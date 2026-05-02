@@ -1,0 +1,39 @@
+NOTICE
+
+cc-flytrap – Local Proxy Utility
+
+This project "cc-flytrap" is a local proxy utility that intercepts traffic between Claude Code and Anthropic's API for debugging and inspection purposes.
+
+1. Local Interception Only
+
+All network interception occurs locally on the user's machine. This tool does not forward, relay, or proxy traffic to any third party other than the intended API endpoint (api.anthropic.com).
+
+2. No Data Exfiltration
+
+This project does not collect, store, or transmit any user data to external servers. All intercepted data remains local and is discarded after processing.
+
+3. No Affiliation or Endorsement
+
+This project is not affiliated with, endorsed by, or sponsored by Anthropic PBC or its products (Claude, Claude Code, Claude.ai, etc.). It is an independent open-source utility.
+
+4. No Circumvention of Protections
+
+This tool does not bypass authentication, authorization, or security controls. Users must have valid API access. It merely modifies request payloads before forwarding—same API endpoint, same authentication, same billing.
+
+5. User Responsibility
+
+Users are solely responsible for ensuring their use of any third-party services complies with applicable terms of service. Modifying API payloads may result in errors (e.g., rate limits, server errors)—this is an expected API behavior.
+
+6. No Warranties
+
+This software is provided "AS IS", without warranty of any kind, express or implied.
+
+7. Limitation of Liability
+
+In no event shall the authors, contributors, or copyright holders be liable for any claim, damages, or other liability arising from the use of this software.
+
+8. Sovereignty Notice
+
+This software runs locally and is controlled by the user. Users are free to modify, fork, and redistribute it.
+
+Copyright (c) 2026 cc-flytrap contributors

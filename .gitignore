@@ -1,0 +1,6 @@
+logs/
+*.log
+debug_system.json
+.DS_Store
+release.sh
+.cc-flytrap.pid
