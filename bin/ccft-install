@@ -100,7 +100,23 @@ EOF
 elif [ "$(uname -s)" = "Linux" ]; then
     systemd_dir="$HOME/.config/systemd/user"
     mkdir -p "$systemd_dir"
-    cp "$SCRIPT_DIR/../../systemd/com.ccft.service" "$systemd_dir/"
+    cat > "$systemd_dir/com.ccft.service" << 'EOF'
+[Unit]
+Description=ccft - Claude Code System Prompt Stripper
+After=network.target
+
+[Service]
+Type=simple
+User=%u
+ExecStart=%h/.local/share/ccft/bin/ccft start
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=%h/.local/share/ccft
+Environment=PATH=/usr/local/bin:%h/.local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+EOF
     systemctl --user daemon-reload
     systemctl --user enable --now com.ccft
     log_info "Service installed: com.ccft (systemd)"
