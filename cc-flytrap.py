@@ -36,6 +36,9 @@ from pathlib import Path
 from mitmproxy import http
 
 import ledger as ledger_module
+# mitmdump reloads this script but Python caches imports — force-reload
+# the ledger module so signature changes (new fields) take effect.
+importlib.reload(ledger_module)
 ledger_add = ledger_module.add
 ledger_reset = ledger_module.reset
 
@@ -103,7 +106,7 @@ if config_file.exists():
 
 # Record ledger on/off state at every script load. brainrot reads
 # state.jsonl to distinguish quiet periods from off-periods in the
-# request stream. Failure here is non-fatal — the proxy still runs.
+# request stream. Failure here is non-fatal — the daemon still runs.
 try:
     # mitmdump reloads this script but not its imports, so freshly-deployed
     # ledger.py functions wouldn't be visible without an explicit reload.
@@ -200,7 +203,11 @@ def request(flow: http.HTTPFlow):
       1. Inject `system_override` as its own additive system block — runs
          whenever an override is configured, regardless of `pain`.
       2. Trim bloated upstream system blocks — only when `pain=false`.
+
+    Also measures ccft's own internal processing time (microseconds) so the user
+    can see whether ccft is adding meaningful latency.
     """
+    _t0 = time.perf_counter()
     _reload_ledger_if_needed()
 
     if "api.anthropic.com" not in flow.request.pretty_url:
@@ -229,7 +236,6 @@ def request(flow: http.HTTPFlow):
         modified_blocks = []
 
         # (1) Always: inject system_override as a separate additive block.
-        # Skip if SYSTEM_OVERRIDE is empty — `pain=true + empty override` is a no-op.
         if SYSTEM_OVERRIDE and SYSTEM_OVERRIDE.strip():
             system.append({"type": "text", "text": SYSTEM_OVERRIDE})
             mutated = True
@@ -276,13 +282,25 @@ def request(flow: http.HTTPFlow):
         logger.error(f"JSON decode error: {e}")
     except Exception as e:
         logger.error(f"Error: {e}")
+    finally:
+        # Stash request-side internal processing time. response() will add its
+        # own slice and write the total to the ledger.
+        flow.metadata['ccft_us_req'] = int(
+            (time.perf_counter() - _t0) * 1_000_000
+        )
 
 
 
 
 
 def response(flow: http.HTTPFlow):
-    """Log API responses and append to the ledger when enabled."""
+    """Log API responses and append to the ledger when enabled.
+
+    Note: response-side bookkeeping (json parse + ledger write) happens
+    AFTER the user has already received their answer. So it doesn't
+    contribute to user-perceived latency. The `ccft_us` we record is
+    purely the request-side work measured in `request()`.
+    """
     _reload_ledger_if_needed()
 
     if "api.anthropic.com" not in flow.request.pretty_url:
@@ -291,8 +309,7 @@ def response(flow: http.HTTPFlow):
     if "/v1/messages" not in flow.request.pretty_url:
         return
 
-    # Off-switch: when ledger is disabled, do nothing here. We still get
-    # the response status logged at the end.
+    # Off-switch: when ledger is disabled, do nothing here.
     if not LEDGER_ENABLED:
         logger.info(f"Response: {flow.response.status_code} (ledger off)")
         return
@@ -339,6 +356,9 @@ def response(flow: http.HTTPFlow):
 
                             latency_ms = int((flow.response.timestamp_end - flow.response.timestamp_start) * 1000)
 
+                            # Pre-request work only — that's what the user feels.
+                            ccft_us = flow.metadata.get('ccft_us_req', 0)
+
                             stats = ledger_add(
                                 model=model,
                                 input_tokens=input_tokens,
@@ -350,10 +370,15 @@ def response(flow: http.HTTPFlow):
                                 region=region,
                                 session_id=session_id,
                                 timestamp_start=flow.request.timestamp_start,
-                                timestamp_end=flow.response.timestamp_end
+                                timestamp_end=flow.response.timestamp_end,
+                                ccft_us=ccft_us,
                             )
                             sid_tag = f" sid:{session_id[:8]}" if session_id else ""
-                            logger.info(f"LEDGER: in:{input_tokens} out:{output_tokens} latency:{latency_ms}ms{sid_tag} total:{stats['total_requests']} reqs")
+                            logger.info(
+                                f"LEDGER: in:{input_tokens} out:{output_tokens} "
+                                f"latency:{latency_ms}ms ccft:{ccft_us}us"
+                                f"{sid_tag} total:{stats['total_requests']} reqs"
+                            )
                             break
                     except:
                         pass

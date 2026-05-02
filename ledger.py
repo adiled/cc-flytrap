@@ -83,39 +83,43 @@ def add(
     region=None,
     session_id=None,
     timestamp_start=None,
-    timestamp_end=None
+    timestamp_end=None,
+    ccft_us=0,
 ):
     record = {
         # Time (epoch seconds with microsecond precision)
         "ts": timestamp_start if timestamp_start else time.time(),
         "te": timestamp_end if timestamp_end else time.time(),
         "dt": time.strftime("%Y-%m-%d %H:%M:%S"),
-        
+
         # Human & Agent
         "human": HUMAN,
         "agent": AGENT_INSTANCE,
         "sid": session_id,
-        
+
         # Network
         "cip": client_ip,
         "pip": get_public_ip(),
         "sip": server_ip,
-        
+
         # API context
         "ep": endpoint,
         "reg": region,
         "model": model or "unknown",
-        
+
         # Tokens & Performance
         "in": input_tokens,
         "out": output_tokens,
         "tot": input_tokens + output_tokens,
-        "lat": latency_ms
+        "lat": latency_ms,
+
+        # ccft internal processing time (microseconds). 0 on legacy records.
+        "c_us": ccft_us,
     }
-    
+
     with open(ledger_file, 'a') as f:
         f.write(json.dumps(record) + '\n')
-    
+
     return get_stats()
 
 def record_state(event, **extra):
