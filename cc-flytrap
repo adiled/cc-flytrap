@@ -3,7 +3,7 @@
 # cc-flytrap - Claude Code System Prompt Stripper
 #
 
-VERSION="1.1.1"
+VERSION="1.1.2"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$SCRIPT_DIR/bin/ccft" "$@"
