@@ -21,6 +21,28 @@ After install, Claude uses it automatically. Restart Claude if already running.
 | `ccft status` | Check running |
 | `ccft install` | Install as service |
 | `ccft update` | Update |
+| `ccft brainrot` | Vibe-check your sessions (see below) |
+
+## Brainrot
+
+Two-axis vibe-check on your sessions. Splits **bot drift** (output collapse, latency choke) from **driver drift** (input bloat, rapid-fire, session sprawl). Tells you whose fault.
+
+```
+bot      37/100  — fine
+driver   71/100  — cooked 🔥
+         ↳ prompts are bloating or driver is rapid-firing
+```
+
+Behavioural only — derived from velocities, latencies, permutations, and volumetrics in the ledger. Never reads your content.
+
+| Command | What |
+|---|---|
+| `ccft brainrot` | Today's dashboard |
+| `ccft brainrot week` | 7-day rollup |
+| `ccft brainrot replay --follow` | Live tail of new requests |
+| `ccft brainrot diff today yesterday` | Compare two ranges |
+| `ccft brainrot session [sid]` | Drill into one session |
+| `ccft brainrot score` | One-liner for status bars |
 
 ## Config
 
