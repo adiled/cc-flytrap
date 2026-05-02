@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+#
+# ccft-start - Start flytrap
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/ccft-lib"
+load_config
+check_files
+
+echo "Starting flytrap on $PROXY_HOST:$PROXY_PORT..."
+
+existing=$(lsof -ti:$PROXY_PORT 2>/dev/null)
+if [ -n "$existing" ]; then
+    echo "Flytrap already running on port $PROXY_PORT (PID $existing)"
+    exit 0
+fi
+
+pid_file="$SCRIPT_DIR/../.ccft.pid"
+[ -f "$pid_file" ] && rm -f "$pid_file"
+
+mitmdump -p $PROXY_PORT -s "$SCRIPT_DIR/../cc-flytrap.py" --set script.reloader=true 2>&1 &
+pid=$!
+echo $pid > "$pid_file"
+sleep 1
+
+if kill -0 $pid 2>/dev/null; then
+    echo "Started (PID $pid)"
+else
+    rm -f "$pid_file"
+    echo "Failed to start" >&2
+    exit 1
+fi

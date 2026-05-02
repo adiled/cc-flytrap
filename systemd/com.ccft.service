@@ -1,0 +1,16 @@
+[Unit]
+Description=ccft - Claude Code System Prompt Stripper
+After=network.target
+
+[Service]
+Type=simple
+User=%u
+ExecStart=/home/%u/cc-flytrap/bin/ccft start
+Environment="XDG_STATE_HOME=%h/.local/share/ccft"
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=%h/cc-flytrap
+Environment=PATH=/usr/local/bin:%h/.local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

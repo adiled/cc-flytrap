@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#
+# ccft-update - Self-update to latest version
+
+REPO="adiled/cc-flytrap"
+CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+echo "Checking for updates..."
+
+# Get latest release tag
+latest=$(curl -sS "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+
+if [ -z "$latest" ]; then
+    echo "Failed to fetch latest version"
+    exit 1
+fi
+
+echo "Latest version: $latest"
+
+# Download tarball
+tmp=$(mktemp -d)
+url="https://github.com/$REPO/archive/refs/tags/$latest.tar.gz"
+curl -sSL "$url" -o "$tmp/ccft.tar.gz"
+tar -xzf "$tmp/ccft.tar.gz" -C "$tmp"
+
+# Backup current
+backup="$CURRENT_DIR.backup.$(date +%Y%m%d_%H%M%S)"
+cp -r "$CURRENT_DIR" "$backup"
+echo "Backed up to: $backup"
+
+# Replace files (excluding user data and git)
+rsync -a --exclude='.git' --exclude='logs' --exclude='.ccft.pid' \
+    --exclude='ledger.jsonl' --exclude='archive' \
+    "$tmp/cc-flytrap-archive/"* "$CURRENT_DIR/"
+
+rm -rf "$tmp"
+
+# Clean up stale files
+rm -f "$CURRENT_DIR/ccft" "$CURRENT_DIR/install.sh"
+log_info "Cleaned up deprecated files"
+
+echo "Updated to $latest"
+echo "Restarting service..."
+if [ "$(uname -s)" = "Darwin" ]; then
+    launchctl unload ~/Library/LaunchAgents/com.ccft.plist 2>/dev/null || true
+    launchctl load ~/Library/LaunchAgents/com.ccft.plist 2>/dev/null || true
+elif [ "$(uname -s)" = "Linux" ]; then
+    systemctl --user restart com.ccft
+fi

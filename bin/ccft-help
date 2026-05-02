@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#
+# ccft-help - Show usage
+
+echo "ccft - Claude Code System Prompt Stripper"
+echo ""
+echo "Usage: ccft [command]"
+echo ""
+echo "Commands:"
+echo "  start       Start flytrap"
+echo "  stop        Stop flytrap"
+echo "  status      Check if flytrap is running"
+echo "  test        Run isolated smoke test"
+echo "  install     Install as background service"
+echo "  uninstall   Remove background service"
+echo "  update      Update to latest version"
+echo "  ledger      Show/reset/archive usage records"
+echo "  version     Show version"
+echo "  help        Show this help"
+echo ""
+echo "Config: $HOME/.config/ccft/ccft.json"
+echo "Ledger: $HOME/.local/share/ccft/ledger.jsonl"
+echo ""
+echo "First time setup:"
+echo "  1. brew install mitmproxy"
+echo "  2. mitmproxy (to generate CA)"
+echo "  3. Install cert from http://mitm.it"
+echo "  4. ccft install"

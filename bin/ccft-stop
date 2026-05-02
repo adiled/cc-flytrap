@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#
+# ccft-stop - Stop flytrap
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/ccft-lib"
+load_config
+
+echo "Stopping flytrap..."
+
+pid_file="$SCRIPT_DIR/../.ccft.pid"
+if [ -f "$pid_file" ]; then
+    pid=$(cat "$pid_file" 2>/dev/null)
+    [ -n "$pid" ] && kill $pid 2>/dev/null
+    rm -f "$pid_file"
+fi
+
+lsof -ti:$PROXY_PORT | xargs kill 2>/dev/null || true
+echo "Stopped"

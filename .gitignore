@@ -3,4 +3,7 @@ logs/
 debug_system.json
 .DS_Store
 release.sh
-.cc-flytrap.pid
+.ccft.pid
+cc-flytrap/docs/
+AGENTS.md
+dev.sh

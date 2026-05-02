@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#
+# ccft-uninstall - Remove background service
+
+os=$(uname -s)
+
+if [ "$os" = "Darwin" ]; then
+    plist="$HOME/Library/LaunchAgents/com.ccft.plist"
+    if [ -f "$plist" ]; then
+        launchctl unload "$plist" 2>/dev/null || true
+        rm -f "$plist"
+        echo "Removed: $plist"
+    fi
+elif [ "$os" = "Linux" ]; then
+    systemctl --user stop com.ccft 2>/dev/null || true
+    systemctl --user disable com.ccft 2>/dev/null || true
+    rm -f "$HOME/.config/systemd/user/com.ccft.service"
+    echo "Removed: com.ccft (systemd)"
+fi
+
+echo "Uninstall complete"
