@@ -1075,6 +1075,217 @@ def cmd_score(args):
 
 # ─── Dispatch ─────────────────────────────────────────────────────────────────
 
+# ─── Driver / Bot split ──────────────────────────────────────────────────────
+#
+# Per the locked-in rule:
+#   Driver input = in − cache_read − cache_creation − tool_result_tokens
+#   "All messages that aren't tool calls or cache inputs are driver."
+#
+# We have `in`, `cr`, `cc` per record. We don't have tool_result_tokens
+# per record (they live inside the `in` payload as user-role tool_result
+# content blocks; we don't capture payloads). So we use timing, not content,
+# to classify each turn — matching the user's stated preference for
+# velocity / latency / volumetric signals over content hashing.
+#
+# Classification: within a session, the first turn and any turn following a
+# gap of > BOT_LOOP_THRESHOLD seconds is DRIVER-initiated. Turns following
+# closely on a predecessor are BOT tool-loop continuations.
+
+BOT_LOOP_THRESHOLD = 5.0  # seconds; gap below this = same logical turn-loop
+
+
+def classify_turns(records):
+    """Annotate each record in-place with `_kind` = 'driver' | 'bot'.
+
+    Walks each session in chronological order. Gap = current.ts − prev.te
+    (time between previous response end and current request start). This
+    excludes server latency, leaving only client-side time = thinking,
+    typing, or near-zero auto-loop dispatch.
+
+    First request of a session, and any request after a gap >
+    BOT_LOOP_THRESHOLD seconds, is DRIVER-initiated. Otherwise BOT.
+
+    Returns the same list (mutated) for convenience.
+    """
+    rs = list(records)
+    by_sid = defaultdict(list)
+    for r in rs:
+        by_sid[r.get('sid') or '_orphan'].append(r)
+    for sid, group in by_sid.items():
+        group.sort(key=lambda r: r.get('ts', 0))
+        prev_te = None
+        for r in group:
+            ts = r.get('ts', 0)
+            te = r.get('te', ts) or ts
+            if prev_te is None or (ts - prev_te) > BOT_LOOP_THRESHOLD:
+                r['_kind'] = 'driver'
+            else:
+                r['_kind'] = 'bot'
+            prev_te = te
+    return rs
+
+
+def split_aggregate(records):
+    """Compute driver-side and bot-side metrics over a record stream.
+
+    Driver tokens per record = in - cr - cc  (cache machinery removed).
+    For driver-classified records, this approximates user-typed input.
+    For bot-classified records, this approximates tool_result feed-back
+    (since cache machinery is also subtracted).
+    """
+    classify_turns(records)
+
+    drv = {'n': 0, 'tok': 0, 'lats': [], 'gaps': [], 'in_total': 0}
+    bot = {'n': 0, 'tok': 0, 'lats': [], 'out': 0, 'cr': 0, 'cc': 0, 'in_total': 0}
+
+    # gap accounting (driver inter-arrival within a session)
+    by_sid = defaultdict(list)
+    for r in records:
+        by_sid[r.get('sid') or '_orphan'].append(r)
+    for sid, group in by_sid.items():
+        group.sort(key=lambda r: r.get('ts', 0))
+        last_driver_ts = None
+        for r in group:
+            if r.get('_kind') == 'driver' and last_driver_ts is not None:
+                drv['gaps'].append(r.get('ts', 0) - last_driver_ts)
+            if r.get('_kind') == 'driver':
+                last_driver_ts = r.get('ts', 0)
+
+    # bot loop length per driver turn
+    loop_lens = []
+    for sid, group in by_sid.items():
+        group.sort(key=lambda r: r.get('ts', 0))
+        cur = 0
+        for r in group:
+            if r.get('_kind') == 'driver':
+                if cur > 0:
+                    loop_lens.append(cur)
+                cur = 1
+            else:
+                cur += 1
+        if cur > 0:
+            loop_lens.append(cur)
+
+    for r in records:
+        in_tok = r.get('in', 0) or 0
+        cr = r.get('cr', 0) or 0
+        cc = r.get('cc', 0) or 0
+        net_in = max(0, in_tok - cr - cc)
+        lat = r.get('lat', 0) or 0
+        out = r.get('out', 0) or 0
+
+        if r.get('_kind') == 'driver':
+            drv['n'] += 1
+            drv['tok'] += net_in
+            drv['lats'].append(lat)
+            drv['in_total'] += in_tok
+        else:
+            bot['n'] += 1
+            bot['tok'] += net_in  # tool_result + scaffolding fed back
+            bot['lats'].append(lat)
+            bot['out'] += out
+            bot['cr'] += cr
+            bot['cc'] += cc
+            bot['in_total'] += in_tok
+
+    # cache reuse on bot side: cr / (cr + cc) when present, else None
+    bot_cache_total = bot['cr'] + bot['cc']
+    bot['cache_reuse'] = (bot['cr'] / bot_cache_total) if bot_cache_total > 0 else None
+
+    return {
+        'drv': drv,
+        'bot': bot,
+        'loop_lens': sorted(loop_lens),
+        'total': drv['n'] + bot['n'],
+    }
+
+
+def cmd_split(args):
+    spec = ' '.join(args) if args else 'today'
+    since, until, label = parse_range(spec)
+    records = list(iter_records(since, until))
+    cov = compute_coverage(load_state_events(), since, until)
+
+    print()
+    print(bold(f"  brainrot split · {label}"))
+    print()
+
+    if cov.get('currently_off'):
+        print(red("  ⚠ ledger is OFF — no records being captured"))
+        print()
+        return
+
+    if not records:
+        if cov.get('off_intervals'):
+            off_s = sum(b - a for a, b in cov['off_intervals'])
+            print(dim(f"  (no records — ledger was off for {fmt_dur(off_s)} of {fmt_dur(cov['total_s'])})"))
+        else:
+            print(dim("  (no records in range)"))
+        print()
+        return
+
+    s = split_aggregate(records)
+    drv, bot = s['drv'], s['bot']
+    total = s['total']
+
+    drv_pct = (drv['n'] / total * 100) if total else 0
+    bot_pct = (bot['n'] / total * 100) if total else 0
+
+    drv_avg_tok = (drv['tok'] / drv['n']) if drv['n'] else 0
+    bot_avg_tok = (bot['tok'] / bot['n']) if bot['n'] else 0
+    drv_avg_lat = (sum(drv['lats']) / len(drv['lats'])) if drv['lats'] else 0
+    bot_avg_lat = (sum(bot['lats']) / len(bot['lats'])) if bot['lats'] else 0
+
+    # Driver line
+    print(f"  {bold('driver')}   {drv['n']:>4} turns  ·  drove   {drv['tok']:>9,} tok  ·  {int(drv_avg_tok):>6,} avg")
+    if drv['gaps']:
+        gaps = sorted(drv['gaps'])
+        med_gap = gaps[len(gaps) // 2]
+        print(dim(f"           gaps p50 {fmt_dur(med_gap)}   p90 {fmt_dur(gaps[int(len(gaps)*0.9)])}   latency {int(drv_avg_lat)}ms avg"))
+    else:
+        print(dim(f"           single driver turn   latency {int(drv_avg_lat)}ms"))
+
+    # Bot line
+    cache_str = ""
+    if bot['cache_reuse'] is not None:
+        cache_str = f"  ·  cache reuse {int(bot['cache_reuse']*100)}%"
+    print(f"  {bold('bot')}      {bot['n']:>4} turns  ·  looped  {bot['tok']:>9,} tok  ·  {int(bot_avg_tok):>6,} avg{cache_str}")
+    if s['loop_lens']:
+        lens = s['loop_lens']
+        p50 = lens[len(lens) // 2]
+        p90 = lens[int(len(lens) * 0.9)] if len(lens) > 1 else lens[0]
+        mx = lens[-1]
+        print(dim(f"           loop length p50={p50}  p90={p90}  max={mx}   output {bot['out']:,} tok   latency {int(bot_avg_lat)}ms avg"))
+    else:
+        print(dim(f"           output {bot['out']:,} tok   latency {int(bot_avg_lat)}ms avg"))
+
+    print()
+
+    # Ratio + interpretation
+    ratio_str = f"{int(drv_pct)}/{int(bot_pct)}"
+    print(f"  {bold('ratio')}    {ratio_str:>6}    ", end='')
+    if drv['n'] == 0:
+        print(dim("no driver turns observed"))
+    elif bot['n'] == 0:
+        print(dim("pure prompting — no tool loops"))
+    elif drv_pct >= 60:
+        print(dim("driver-heavy — lots of typing, agent doing little tool work"))
+    elif bot_pct >= 75:
+        print(dim("bot-heavy — agent is grinding through tool loops"))
+    else:
+        print(dim("balanced — driver steers, agent acts"))
+
+    # Driver token weight
+    if drv['n']:
+        if drv_avg_tok > 8000:
+            print(f"  {bold('driver tok')}  {int(drv_avg_tok):>6,}    " + dim("heavy — long prompts or paste-heavy"))
+        elif drv_avg_tok < 200:
+            print(f"  {bold('driver tok')}  {int(drv_avg_tok):>6,}    " + dim("light — short directive prompts"))
+        else:
+            print(f"  {bold('driver tok')}  {int(drv_avg_tok):>6,}    " + dim("normal range"))
+
+    print()
+
 USAGE = """\
 usage: ccft brainrot [subcommand] [args]
 
@@ -1085,6 +1296,7 @@ usage: ccft brainrot [subcommand] [args]
   diff A B         compare two ranges
   session [sid]    list sessions today, or drill into one
   score [range]    one-line brainrot score (good for status bars)
+  split [range]    driver vs bot turn split — who's doing the work?
 
 ranges:  today, yesterday, 24h, 7d, prev 7d, all, YYYY-MM-DD, Nh, Nd
 """
@@ -1102,6 +1314,7 @@ def main(argv):
         'diff':    cmd_diff,
         'session': cmd_session,
         'score':   cmd_score,
+        'split':   cmd_split,
         'help':    lambda _: print(USAGE),
         '--help':  lambda _: print(USAGE),
         '-h':      lambda _: print(USAGE),

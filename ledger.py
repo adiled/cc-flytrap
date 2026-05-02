@@ -85,6 +85,8 @@ def add(
     timestamp_start=None,
     timestamp_end=None,
     ccft_us=0,
+    cache_read=0,
+    cache_creation=0,
 ):
     record = {
         # Time (epoch seconds with microsecond precision)
@@ -112,6 +114,12 @@ def add(
         "out": output_tokens,
         "tot": input_tokens + output_tokens,
         "lat": latency_ms,
+
+        # Cache tokens (subset of `in` reported separately by Anthropic).
+        # Driver-token math needs these to subtract machinery from input.
+        # 0 on legacy records.
+        "cr": cache_read,
+        "cc": cache_creation,
 
         # ccft internal processing time (microseconds). 0 on legacy records.
         "c_us": ccft_us,

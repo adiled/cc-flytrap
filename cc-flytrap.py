@@ -318,70 +318,86 @@ def response(flow: http.HTTPFlow):
         if flow.response.content:
             body = flow.response.content.decode('utf-8', errors='replace')
 
+            # Aggregate usage across the streamed events. Anthropic reports
+            # input_tokens (and cache_*) in message_start, then output_tokens
+            # arrive in subsequent message_delta events.
+            agg_in = 0
+            agg_out = 0
+            agg_cr = 0
+            agg_cc = 0
+            agg_model = None
+
             for line in body.split('\n'):
-                if line.startswith('data: '):
-                    data_str = line[6:]
-                    try:
-                        data = json.loads(data_str)
-                        msg_type = data.get('type')
+                if not line.startswith('data: '):
+                    continue
+                data_str = line[6:]
+                try:
+                    data = json.loads(data_str)
+                except Exception:
+                    continue
 
-                        model = None
-                        usage = {}
-                        if msg_type == 'message_start':
-                            usage = data.get('message', {}).get('usage', {})
-                            model = data.get('message', {}).get('model')
-                        elif msg_type == 'message_delta':
-                            usage = data.get('delta', {}).get('usage', {})
+                msg_type = data.get('type')
+                if msg_type == 'message_start':
+                    msg = data.get('message', {})
+                    usage = msg.get('usage', {}) or {}
+                    agg_model = msg.get('model') or agg_model
+                    agg_in += usage.get('input_tokens', 0) or 0
+                    agg_out += usage.get('output_tokens', 0) or 0
+                    agg_cr += usage.get('cache_read_input_tokens', 0) or 0
+                    agg_cc += usage.get('cache_creation_input_tokens', 0) or 0
+                elif msg_type == 'message_delta':
+                    usage = data.get('delta', {}).get('usage', {}) or {}
+                    # delta usage typically only carries output_tokens
+                    agg_in += usage.get('input_tokens', 0) or 0
+                    agg_out += usage.get('output_tokens', 0) or 0
+                    agg_cr += usage.get('cache_read_input_tokens', 0) or 0
+                    agg_cc += usage.get('cache_creation_input_tokens', 0) or 0
 
-                        input_tokens = usage.get('input_tokens', 0)
-                        output_tokens = usage.get('output_tokens', 0)
+            if agg_in or agg_out:
+                client_ip = None
+                if flow.client_conn and flow.client_conn.peername:
+                    client_ip = flow.client_conn.peername[0]
 
-                        if input_tokens or output_tokens:
-                            client_ip = None
-                            if flow.client_conn and flow.client_conn.peername:
-                                client_ip = flow.client_conn.peername[0]
+                server_ip = None
+                if flow.server_conn and hasattr(flow.server_conn, 'ip_address') and flow.server_conn.ip_address:
+                    server_ip = flow.server_conn.ip_address[0] if isinstance(flow.server_conn.ip_address, tuple) else flow.server_conn.ip_address
 
-                            server_ip = None
-                            if flow.server_conn and hasattr(flow.server_conn, 'ip_address') and flow.server_conn.ip_address:
-                                server_ip = flow.server_conn.ip_address[0] if isinstance(flow.server_conn.ip_address, tuple) else flow.server_conn.ip_address
+                endpoint = flow.request.pretty_url
+                region = None
+                if flow.server_conn and flow.server_conn.address:
+                    pass  # Region requires GeoIP, leave as None for now
 
-                            endpoint = flow.request.pretty_url
-                            region = None
-                            if flow.server_conn and flow.server_conn.address:
-                                pass  # Region requires GeoIP, leave as None for now
+                session_id = flow.metadata.get('ccft_session_id')
+                if not session_id:
+                    session_id = extract_session_id(flow)
 
-                            session_id = flow.metadata.get('ccft_session_id')
-                            if not session_id:
-                                session_id = extract_session_id(flow)
+                latency_ms = int((flow.response.timestamp_end - flow.response.timestamp_start) * 1000)
 
-                            latency_ms = int((flow.response.timestamp_end - flow.response.timestamp_start) * 1000)
+                # Pre-request work only — that's what the user feels.
+                ccft_us = flow.metadata.get('ccft_us_req', 0)
 
-                            # Pre-request work only — that's what the user feels.
-                            ccft_us = flow.metadata.get('ccft_us_req', 0)
-
-                            stats = ledger_add(
-                                model=model,
-                                input_tokens=input_tokens,
-                                output_tokens=output_tokens,
-                                latency_ms=latency_ms,
-                                client_ip=client_ip,
-                                server_ip=server_ip,
-                                endpoint=endpoint,
-                                region=region,
-                                session_id=session_id,
-                                timestamp_start=flow.request.timestamp_start,
-                                timestamp_end=flow.response.timestamp_end,
-                                ccft_us=ccft_us,
-                            )
-                            sid_tag = f" sid:{session_id[:8]}" if session_id else ""
-                            logger.info(
-                                f"LEDGER: in:{input_tokens} out:{output_tokens} "
-                                f"latency:{latency_ms}ms ccft:{ccft_us}us"
-                                f"{sid_tag} total:{stats['total_requests']} reqs"
-                            )
-                            break
-                    except:
-                        pass
+                stats = ledger_add(
+                    model=agg_model,
+                    input_tokens=agg_in,
+                    output_tokens=agg_out,
+                    latency_ms=latency_ms,
+                    client_ip=client_ip,
+                    server_ip=server_ip,
+                    endpoint=endpoint,
+                    region=region,
+                    session_id=session_id,
+                    timestamp_start=flow.request.timestamp_start,
+                    timestamp_end=flow.response.timestamp_end,
+                    ccft_us=ccft_us,
+                    cache_read=agg_cr,
+                    cache_creation=agg_cc,
+                )
+                sid_tag = f" sid:{session_id[:8]}" if session_id else ""
+                logger.info(
+                    f"LEDGER: in:{agg_in} out:{agg_out} cr:{agg_cr} cc:{agg_cc} "
+                    f"latency:{latency_ms}ms ccft:{ccft_us}us"
+                    f"{sid_tag} total:{stats['total_requests']} reqs"
+                )
     except Exception as e:
         print(f"[LEDGER] Failed: {e}", flush=True)
 
