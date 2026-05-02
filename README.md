@@ -4,10 +4,8 @@ Claude Code optimizer. ~95% less tokens → faster + cheaper.
 
 ## Install
 
-Give your LLM this prompt:
-
-```
-Install cc-flytrap from https://github.com/adiled/cc-flytrap
+```bash
+curl -fsSL https://raw.githubusercontent.com/adiled/cc-flytrap/main/install.sh | bash
 ```
 
 ## Use
