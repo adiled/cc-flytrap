@@ -4,10 +4,10 @@ Claude Code optimizer. ~95% less tokens → faster + cheaper.
 
 ## Install
 
-```bash
-mkdir -p ~/.local/share/ccft
-curl -sL https://github.com/adiled/cc-flytrap/releases/latest/download/cc-flytrap.tar.gz | tar -xz -C ~/.local/share/ccft
-~/.local/share/ccft/bin/ccft install
+Give your LLM this prompt:
+
+```
+Install cc-flytrap from https://github.com/adiled/cc-flytrap
 ```
 
 ## Use
