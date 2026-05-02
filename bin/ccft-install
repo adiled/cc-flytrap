@@ -73,6 +73,11 @@ rm -f "$SCRIPT_DIR/../ccft" "$SCRIPT_DIR/../install.sh"
 rm -rf "$SCRIPT_DIR/../logs"
 log_info "Cleaned up deprecated files"
 
+# Add to PATH
+mkdir -p "$HOME/.local/bin"
+ln -sf "$HOME/.local/share/ccft/bin/ccft" "$HOME/.local/bin/ccft"
+log_info "Added ccft to PATH (~/.local/bin)"
+
 if [ "$(uname -s)" = "Darwin" ]; then
     plist="$HOME/Library/LaunchAgents/com.ccft.plist"
     mkdir -p "$HOME/Library/LaunchAgents"

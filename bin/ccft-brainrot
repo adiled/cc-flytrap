@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+#
+# ccft-brainrot - time-series vibe analyzer for the ledger
+#
+# Subcommands forwarded to brainrot.py.
+
+set -e
+
+# Locate brainrot.py: prefer the install dir, fall back to repo root.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+candidates=(
+    "$SCRIPT_DIR/../brainrot.py"
+    "$HOME/.local/share/ccft/brainrot.py"
+    "$SCRIPT_DIR/brainrot.py"
+)
+
+brainrot_py=""
+for p in "${candidates[@]}"; do
+    if [ -f "$p" ]; then
+        brainrot_py="$p"
+        break
+    fi
+done
+
+if [ -z "$brainrot_py" ]; then
+    echo "ccft brainrot: cannot find brainrot.py" >&2
+    echo "  searched: ${candidates[*]}" >&2
+    exit 1
+fi
+
+exec python3 "$brainrot_py" "$@"
