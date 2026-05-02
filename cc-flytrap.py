@@ -103,18 +103,26 @@ TRIMMED_BLOCK_4 = """# Text output (does not apply to tool calls)
 Assume users can't see most tool calls or thinking — only your text output. Before your first tool call, state in one sentence what you're about to do. While working, give short updates at key moments: when you find something, when you change direction, or when you hit a blocker. Brief is good — silent is not. One sentence per update is almost always enough."""
 
 
-_SESSION_IN_USER_ID = re.compile(r'_session_([0-9a-f][0-9a-f-]{6,})')
+_SESSION_IN_USER_ID = re.compile(r'_session_([0-9a-fA-F][0-9a-fA-F-]{6,})')
 
 
 def extract_session_id(flow, data=None):
-    """Pull a stable session id from the request.
+    """Pull the per-session id from a Claude Code (or generic SDK) request.
 
-    Tries headers first (cheap), then the messages-API metadata block.
-    Claude Code's `metadata.user_id` typically embeds the session uuid as
-    `..._session_<uuid>`; we extract it. Falls back to a short hash of
-    `user_id` so we still get a stable bucket per logical caller.
+    Order of preference, all observed in real Claude Code traffic:
+      1. `X-Claude-Code-Session-Id` header (Claude Code, every request)
+      2. Other Anthropic/SDK session-ish headers (defensive)
+      3. `metadata.session_id` (apps using the SDK metadata field directly)
+      4. `metadata.user_id` parsed as JSON — Claude Code wraps device,
+         account, and session UUIDs in a single JSON-encoded user_id
+      5. SHA-1 of `metadata.user_id` — stable per-user bucket fallback
     """
-    for h in ('anthropic-session-id', 'x-session-id', 'x-anthropic-session-id'):
+    sid = flow.request.headers.get('x-claude-code-session-id')
+    if sid:
+        return sid
+
+    for h in ('anthropic-session-id', 'x-session-id', 'x-anthropic-session-id',
+              'anthropic-conversation-id', 'x-anthropic-conversation-id'):
         v = flow.request.headers.get(h)
         if v:
             return v
@@ -134,12 +142,22 @@ def extract_session_id(flow, data=None):
         return sid
 
     uid = meta.get('user_id') or ''
+    if uid.startswith('{'):
+        try:
+            blob = json.loads(uid)
+            sid = blob.get('session_id') or blob.get('sessionId')
+            if sid:
+                return sid
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+    # Legacy `..._session_<uuid>` pattern, kept for older SDKs.
     m = _SESSION_IN_USER_ID.search(uid)
     if m:
         return m.group(1)
+
     if uid:
         return 'u-' + hashlib.sha1(uid.encode()).hexdigest()[:16]
-
     return None
 
 

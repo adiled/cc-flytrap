@@ -9,6 +9,17 @@ source "$SCRIPT_DIR/ccft-lib"
 REPO="adiled/cc-flytrap"
 CURRENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Refuse to run from anywhere but the install dir. Avoids accidentally
+# overwriting a developer's working copy when ccft-update is invoked
+# from the repo (e.g. during a bootstrap). Override with CCFT_FORCE=1.
+EXPECTED_DIR="$HOME/.local/share/ccft"
+if [ "$CURRENT_DIR" != "$EXPECTED_DIR" ] && [ "${CCFT_FORCE:-0}" != "1" ]; then
+    echo "ccft update: refusing to run from '$CURRENT_DIR'" >&2
+    echo "  expected: $EXPECTED_DIR" >&2
+    echo "  set CCFT_FORCE=1 to override (e.g. for bootstrap)" >&2
+    exit 1
+fi
+
 echo "Checking for updates..."
 
 latest=$(curl -sS "https://api.github.com/repos/$REPO/releases/latest" \
@@ -52,7 +63,7 @@ backup="$CURRENT_DIR.backup.$(date +%Y%m%d_%H%M%S)"
 cp -r "$CURRENT_DIR" "$backup"
 log_info "Backed up to: $backup"
 
-rsync -a --delete \
+rsync -a \
     --exclude='.git' --exclude='logs' --exclude='.ccft.pid' \
     --exclude='ledger.jsonl' --exclude='archive' \
     "$payload_dir/" "$CURRENT_DIR/"
