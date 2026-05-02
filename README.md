@@ -1,6 +1,8 @@
 # cc-flytrap
 
-Claude Code System Prompt Stripper - Intercepts Claude Code's API calls and strips bloated system prompts (~95% reduction).
+Claude Code Optimizer - Makes Claude Code faster and cheaper by removing API bloat.
+
+**Result**: ~95% less tokens per request → lower latency, lower cost.
 
 ## Quick Install
 
@@ -11,7 +13,7 @@ cd ~/cc-flytrap
 
 ## Usage
 
-Claude automatically uses flytrap if configured. Otherwise:
+Claude automatically uses flytrap after install. Or manually:
 
 ```bash
 HTTP_PROXY=http://127.0.0.1:7178 \
@@ -23,54 +25,44 @@ claude -p "your prompt"
 ## Commands
 
 ```bash
-ccft start      # Start flytrap
-ccft stop       # Stop flytrap
+ccft start      # Start optimizer
+ccft stop       # Stop optimizer
 ccft status     # Check status
 ccft test       # Run smoke test
 ccft install    # Install as service
 ccft uninstall  # Remove service
-ccft ledger    # Show/reset/archive usage
+ccft ledger    # Show/reset usage records
 ccft update     # Update to latest
 ```
 
 ## Requirements
 
-1. **mitmproxy** - Install with `brew install mitmproxy` (macOS) or `sudo apt install mitmproxy` (Linux)
-2. **CA Certificate** - Run `mitmproxy` once, then install certificate from http://mitm.it to your system keychain
+1. **mitmproxy** - `brew install mitmproxy` (macOS) or `sudo apt install mitmproxy` (Linux)
+2. **CA Certificate** - Run `mitmproxy` once, then install from http://mitm.it
 
 ## Configuration
 
-Edit `~/.config/ccft/ccft.json`:
+`~/.config/ccft/ccft.json`:
 
 ```json
 {
   "system_override": "",
-  "port": 3128,
+  "port": 7178,
   "host": "127.0.0.1"
 }
 ```
 
-- `system_override` - Custom text to inject (optional)
-- `port` - Flytrap listener port (default: 7178)
-- `host` - Flytrap listener host (default: 127.0.0.1)
-
-## What it does
-
-Original: ~4,000 words per request  
-Stripped: ~200 words per request (~95% reduction)
-
-- Block 1: Billing header (kept)
-- Block 2: Identity prefix (kept - modifying triggers 500 errors)
-- Block 3: Trimmed with system_override tag
-- Block 4: Trimmed
+- `system_override` - Custom instruction text (optional)
+- `port` - Listener port (default: 7178)
+- `host` - Listener host (default: 127.0.0.1)
 
 ## Ledger
 
-Usage records stored in JSONL format at `~/.local/share/ccft/ledger.jsonl`.
+Usage records at `~/.local/share/ccft/ledger.jsonl`:
 
 ```bash
-ccft ledger show      # Show last 5 records
-ccft ledger records  # Show last 20
+ccft ledger show      # Last 5 records
+ccft ledger records  # Last 20
 ccft ledger reset    # Archive and reset
 ```
 
