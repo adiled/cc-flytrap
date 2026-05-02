@@ -130,9 +130,7 @@ if config_file.exists():
 
 TRIMMED_BLOCK_2 = "You are a Claude agent, built on Anthropic's Claude Agent SDK."
 
-TRIMMED_BLOCK_3 = f"""{SYSTEM_OVERRIDE}
-
-You may use URLs provided by the user in messages or local files.
+TRIMMED_BLOCK_3 = """You may use URLs provided by the user in messages or local files.
 
 Output text goes to the user. Use Github-flavored markdown.
 Tools run in user-selected permission mode - if denied, think about why and adjust approach.
@@ -208,9 +206,10 @@ def extract_session_id(flow, data=None):
 def request(flow: http.HTTPFlow):
     """Intercept Anthropic /v1/messages calls.
 
-    Always: extract session id (cheap, needed by ledger downstream).
-    When PAIN_ENABLED is False (default): trim bloated system-prompt blocks.
-    When PAIN_ENABLED is True: leave the painful prompts untouched (passive).
+    Two independent transformations:
+      1. Inject `system_override` as its own additive system block — runs
+         whenever an override is configured, regardless of `pain`.
+      2. Trim bloated upstream system blocks — only when `pain=false`.
     """
     _reload_ledger_if_needed()
 
@@ -232,51 +231,56 @@ def request(flow: http.HTTPFlow):
         if sid:
             flow.metadata['ccft_session_id'] = sid
 
-        # pain=true  → caller wants the pain; leave system prompts alone.
-        # pain=false → relieve the pain by trimming bloated blocks (default).
-        if PAIN_ENABLED:
-            return
-
         system = data.get("system", [])
         if not isinstance(system, list):
             return
 
-        original_total = sum(
-            len(block.get("text", "").split())
-            for block in system if isinstance(block, dict)
-        )
-
+        mutated = False
         modified_blocks = []
 
-        if len(system) >= 2 and isinstance(system[1], dict):
-            original = len(system[1].get("text", "").split())
-            system[1]["text"] = TRIMMED_BLOCK_2
-            modified_blocks.append(f"Block2: {original}->{len(TRIMMED_BLOCK_2.split())}")
+        # (1) Always: inject system_override as a separate additive block.
+        # Skip if SYSTEM_OVERRIDE is empty — `pain=true + empty override` is a no-op.
+        if SYSTEM_OVERRIDE and SYSTEM_OVERRIDE.strip():
+            system.append({"type": "text", "text": SYSTEM_OVERRIDE})
+            mutated = True
+            modified_blocks.append(f"Override:+{len(SYSTEM_OVERRIDE.split())}w")
 
-        if len(system) >= 3 and isinstance(system[2], dict):
-            original = len(system[2].get("text", "").split())
-            system[2]["text"] = TRIMMED_BLOCK_3
-            modified_blocks.append(f"Block3: {original}->{len(TRIMMED_BLOCK_3.split())}")
-
-        if len(system) >= 4 and isinstance(system[3], dict):
-            original = len(system[3].get("text", "").split())
-            system[3]["text"] = TRIMMED_BLOCK_4
-            modified_blocks.append(f"Block4: {original}->{len(TRIMMED_BLOCK_4.split())}")
-
-        if modified_blocks:
-            data["system"] = system
-            new_body = json.dumps(data)
-            flow.request.content = new_body.encode("utf-8")
-            flow.request.headers["content-length"] = str(len(new_body))
-
-            new_total = sum(
+        # (2) Only when pain=false: trim the upstream bloat.
+        if not PAIN_ENABLED:
+            original_total = sum(
                 len(block.get("text", "").split())
                 for block in system if isinstance(block, dict)
             )
 
-            logger.info(f"Modified: {', '.join(modified_blocks)} | {original_total}->{new_total} words")
-        else:
-            logger.info(f"No modifications needed ({original_total} words)")
+            if len(system) >= 2 and isinstance(system[1], dict):
+                original = len(system[1].get("text", "").split())
+                system[1]["text"] = TRIMMED_BLOCK_2
+                modified_blocks.append(f"Block2: {original}->{len(TRIMMED_BLOCK_2.split())}")
+
+            if len(system) >= 3 and isinstance(system[2], dict):
+                original = len(system[2].get("text", "").split())
+                system[2]["text"] = TRIMMED_BLOCK_3
+                modified_blocks.append(f"Block3: {original}->{len(TRIMMED_BLOCK_3.split())}")
+
+            if len(system) >= 4 and isinstance(system[3], dict):
+                original = len(system[3].get("text", "").split())
+                system[3]["text"] = TRIMMED_BLOCK_4
+                modified_blocks.append(f"Block4: {original}->{len(TRIMMED_BLOCK_4.split())}")
+
+            if any(m.startswith('Block') for m in modified_blocks):
+                mutated = True
+                new_total = sum(
+                    len(block.get("text", "").split())
+                    for block in system if isinstance(block, dict)
+                )
+                logger.info(f"Trim: {original_total}->{new_total} words")
+
+        if mutated:
+            data["system"] = system
+            new_body = json.dumps(data)
+            flow.request.content = new_body.encode("utf-8")
+            flow.request.headers["content-length"] = str(len(new_body))
+            logger.info(f"Modified: {', '.join(modified_blocks)}")
 
     except json.JSONDecodeError as e:
         logger.error(f"JSON decode error: {e}")
