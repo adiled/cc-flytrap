@@ -11,7 +11,7 @@ instruction blocks while keeping the agent identity intact.
 Usage:
     mitmdump -p 3128 -s cc-flytrap.py
 
-Then run Claude with proxy:
+Then run Claude through the interceptor:
     HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 \
         NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-cert.pem claude -p "hi"
 

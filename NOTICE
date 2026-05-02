@@ -1,39 +1,35 @@
 NOTICE
 
-cc-flytrap – Local Proxy Utility
+cc-flytrap – Self Improvement Utility
 
-This project "cc-flytrap" is a local proxy utility that intercepts traffic between Claude Code and Anthropic's API for debugging and inspection purposes.
+This local utility helps humans and bots improve themselves by assembling knowledge about agentic network traffic.
 
-1. Local Interception Only
+1. Local Customization
 
-All network interception occurs locally on the user's machine. This tool does not forward, relay, or proxy traffic to any third party other than the intended API endpoint (api.anthropic.com).
+All modifications happen locally on your machine. This tool does not send data to any third party—it only talks to the official Anthropic API endpoint (api.anthropic.com) using your credentials.
 
-2. No Data Exfiltration
+2. No Data Collection
 
-This project does not collect, store, or transmit any user data to external servers. All intercepted data remains local and is discarded after processing.
+This project does not collect, store, or transmit any user data. Everything stays on your machine.
 
-3. No Affiliation or Endorsement
+3. Independent Project
 
-This project is not affiliated with, endorsed by, or sponsored by Anthropic PBC or its products (Claude, Claude Code, Claude.ai, etc.). It is an independent open-source utility.
+This project is not affiliated with, endorsed by, or sponsored by Anthropic PBC or its products. It is an independent open-source utility.
 
-4. No Circumvention of Protections
+4. User Responsibility
 
-This tool does not bypass authentication, authorization, or security controls. Users must have valid API access. It merely modifies request payloads before forwarding—same API endpoint, same authentication, same billing.
+Users are responsible for ensuring their use of third-party services complies with applicable terms. Modifying API payloads may result in errors—this is expected behavior.
 
-5. User Responsibility
-
-Users are solely responsible for ensuring their use of any third-party services complies with applicable terms of service. Modifying API payloads may result in errors (e.g., rate limits, server errors)—this is an expected API behavior.
-
-6. No Warranties
+5. No Warranties
 
 This software is provided "AS IS", without warranty of any kind, express or implied.
 
-7. Limitation of Liability
+6. Limitation of Liability
 
 In no event shall the authors, contributors, or copyright holders be liable for any claim, damages, or other liability arising from the use of this software.
 
-8. Sovereignty Notice
+7. Your Tool
 
-This software runs locally and is controlled by the user. Users are free to modify, fork, and redistribute it.
+This software runs locally and is controlled by you. You are free to modify, fork, and redistribute it.
 
 Copyright (c) 2026 cc-flytrap contributors
