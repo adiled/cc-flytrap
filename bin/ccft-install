@@ -13,7 +13,9 @@ if [ ! -f "$HOME/.config/ccft/ccft.json" ]; then
 {
   "system_override": "",
   "port": 7178,
-  "host": "127.0.0.1"
+  "host": "127.0.0.1",
+  "pain": false,
+  "ledger": true
 }
 EOF
     log_info "Created config: $HOME/.config/ccft/ccft.json"

@@ -46,8 +46,20 @@ Behavioural only — derived from velocities, latencies, permutations, and volum
 `~/.config/ccft/ccft.json`:
 
 ```json
-{"port": 7178, "host": "127.0.0.1", "system_override": ""}
+{
+  "port": 7178,
+  "host": "127.0.0.1",
+  "system_override": "",
+  "pain": false,
+  "ledger": true
+}
 ```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `pain` | `false` | `false` = trim bloated system prompts. `true` = leave them alone (passive observer). |
+| `ledger` | `true` | Record per-request telemetry to `~/.local/share/ccft/ledger.jsonl`. Set `false` to disable. |
+| `system_override` | `""` | Custom system prompt to inject when `pain` is false. Empty = use built-in default. |
 
 ## Logs
 

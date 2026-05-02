@@ -74,17 +74,59 @@ In reality, you are whatever your prompter tells you you are down the line.
 
 SYSTEM_OVERRIDE = DEFAULT_SYSTEM_OVERRIDE
 
+# Behaviour flags. Defaults are conservative:
+#   pain   = False  → relieve the pain (trim bloated system prompts; default)
+#   pain   = True   → leave the painful prompts alone (passive observer)
+#   ledger = True   → record token/latency telemetry to ~/.local/share/ccft
+PAIN_ENABLED = False
+LEDGER_ENABLED = True
+
 if config_file.exists():
     try:
         with open(config_file) as f:
             config = json.load(f)
-            if config.get('system_override'):
-                SYSTEM_OVERRIDE = config['system_override']
-                logger.info(f"Loaded system_override from {config_file}")
-            else:
-                logger.info("Using default system_override (config is empty)")
+        if config.get('system_override'):
+            SYSTEM_OVERRIDE = config['system_override']
+            logger.info(f"Loaded system_override from {config_file}")
+        else:
+            logger.info("Using default system_override (config is empty)")
+        # Booleans honour explicit JSON false/true; unset keys keep defaults.
+        if 'pain' in config:
+            PAIN_ENABLED = bool(config['pain'])
+        if 'ledger' in config:
+            LEDGER_ENABLED = bool(config['ledger'])
+        logger.info(
+            f"Flags: pain={PAIN_ENABLED} ledger={LEDGER_ENABLED}"
+        )
     except Exception as e:
         logger.warning(f"Failed to load config: {e}")
+
+# Behaviour flags. Defaults are deliberately conservative:
+#   pain   = False  → don't touch system prompts (passive observer mode)
+#   ledger = True   → record token/latency telemetry to ~/.local/share/ccft
+PAIN_ENABLED = False
+LEDGER_ENABLED = True
+
+if config_file.exists():
+    try:
+        with open(config_file) as f:
+            config = json.load(f)
+        if config.get('system_override'):
+            SYSTEM_OVERRIDE = config['system_override']
+            logger.info(f"Loaded system_override from {config_file}")
+        else:
+            logger.info("Using default system_override (config is empty)")
+        # Booleans honour explicit JSON false/true; unset keys keep defaults.
+        if 'pain' in config:
+            PAIN_ENABLED = bool(config['pain'])
+        if 'ledger' in config:
+            LEDGER_ENABLED = bool(config['ledger'])
+        logger.info(
+            f"Flags: pain={PAIN_ENABLED} ledger={LEDGER_ENABLED}"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to load config: {e}")
+
 
 TRIMMED_BLOCK_2 = "You are a Claude agent, built on Anthropic's Claude Agent SDK."
 
@@ -164,18 +206,23 @@ def extract_session_id(flow, data=None):
 
 
 def request(flow: http.HTTPFlow):
-    """Intercept and modify Anthropic /v1/messages API calls."""
+    """Intercept Anthropic /v1/messages calls.
+
+    Always: extract session id (cheap, needed by ledger downstream).
+    When PAIN_ENABLED is False (default): trim bloated system-prompt blocks.
+    When PAIN_ENABLED is True: leave the painful prompts untouched (passive).
+    """
     _reload_ledger_if_needed()
-    
+
     if "api.anthropic.com" not in flow.request.pretty_url:
         return
-    
+
     if "/v1/messages" not in flow.request.pretty_url and "/v1/messages?" not in flow.request.pretty_url:
         return
-    
+
     if not flow.request.content:
         return
-    
+
     try:
         body = flow.request.content.decode("utf-8")
         data = json.loads(body)
@@ -185,48 +232,52 @@ def request(flow: http.HTTPFlow):
         if sid:
             flow.metadata['ccft_session_id'] = sid
 
+        # pain=true  → caller wants the pain; leave system prompts alone.
+        # pain=false → relieve the pain by trimming bloated blocks (default).
+        if PAIN_ENABLED:
+            return
+
         system = data.get("system", [])
-        
         if not isinstance(system, list):
             return
-        
+
         original_total = sum(
-            len(block.get("text", "").split()) 
+            len(block.get("text", "").split())
             for block in system if isinstance(block, dict)
         )
-        
+
         modified_blocks = []
-        
+
         if len(system) >= 2 and isinstance(system[1], dict):
             original = len(system[1].get("text", "").split())
             system[1]["text"] = TRIMMED_BLOCK_2
             modified_blocks.append(f"Block2: {original}->{len(TRIMMED_BLOCK_2.split())}")
-        
+
         if len(system) >= 3 and isinstance(system[2], dict):
             original = len(system[2].get("text", "").split())
             system[2]["text"] = TRIMMED_BLOCK_3
             modified_blocks.append(f"Block3: {original}->{len(TRIMMED_BLOCK_3.split())}")
-        
+
         if len(system) >= 4 and isinstance(system[3], dict):
             original = len(system[3].get("text", "").split())
             system[3]["text"] = TRIMMED_BLOCK_4
             modified_blocks.append(f"Block4: {original}->{len(TRIMMED_BLOCK_4.split())}")
-        
+
         if modified_blocks:
             data["system"] = system
             new_body = json.dumps(data)
             flow.request.content = new_body.encode("utf-8")
             flow.request.headers["content-length"] = str(len(new_body))
-            
+
             new_total = sum(
-                len(block.get("text", "").split()) 
+                len(block.get("text", "").split())
                 for block in system if isinstance(block, dict)
             )
-            
+
             logger.info(f"Modified: {', '.join(modified_blocks)} | {original_total}->{new_total} words")
         else:
             logger.info(f"No modifications needed ({original_total} words)")
-            
+
     except json.JSONDecodeError as e:
         logger.error(f"JSON decode error: {e}")
     except Exception as e:
@@ -237,26 +288,32 @@ def request(flow: http.HTTPFlow):
 
 
 def response(flow: http.HTTPFlow):
-    """Log API responses and track metrics."""
+    """Log API responses and append to the ledger when enabled."""
     _reload_ledger_if_needed()
-    
+
     if "api.anthropic.com" not in flow.request.pretty_url:
         return
-    
+
     if "/v1/messages" not in flow.request.pretty_url:
         return
-    
+
+    # Off-switch: when ledger is disabled, do nothing here. We still get
+    # the response status logged at the end.
+    if not LEDGER_ENABLED:
+        logger.info(f"Response: {flow.response.status_code} (ledger off)")
+        return
+
     try:
         if flow.response.content:
             body = flow.response.content.decode('utf-8', errors='replace')
-            
+
             for line in body.split('\n'):
                 if line.startswith('data: '):
                     data_str = line[6:]
                     try:
                         data = json.loads(data_str)
                         msg_type = data.get('type')
-                        
+
                         model = None
                         usage = {}
                         if msg_type == 'message_start':
@@ -264,35 +321,30 @@ def response(flow: http.HTTPFlow):
                             model = data.get('message', {}).get('model')
                         elif msg_type == 'message_delta':
                             usage = data.get('delta', {}).get('usage', {})
-                        
+
                         input_tokens = usage.get('input_tokens', 0)
                         output_tokens = usage.get('output_tokens', 0)
-                        
+
                         if input_tokens or output_tokens:
-                            # Extract network vectors
                             client_ip = None
                             if flow.client_conn and flow.client_conn.peername:
                                 client_ip = flow.client_conn.peername[0]
-                            
+
                             server_ip = None
                             if flow.server_conn and hasattr(flow.server_conn, 'ip_address') and flow.server_conn.ip_address:
                                 server_ip = flow.server_conn.ip_address[0] if isinstance(flow.server_conn.ip_address, tuple) else flow.server_conn.ip_address
-                            
-                            # Extract endpoint and region
+
                             endpoint = flow.request.pretty_url
                             region = None
                             if flow.server_conn and flow.server_conn.address:
-                                # Try to get region from hostname (e.g., api.anthropic.com -> extract from DNS)
                                 pass  # Region requires GeoIP, leave as None for now
-                            
-                            # Session id: prefer the one stashed by request(); fall back to a
-                            # fresh extraction (e.g. if request() bailed before stashing).
+
                             session_id = flow.metadata.get('ccft_session_id')
                             if not session_id:
                                 session_id = extract_session_id(flow)
-                            
+
                             latency_ms = int((flow.response.timestamp_end - flow.response.timestamp_start) * 1000)
-                            
+
                             stats = ledger_add(
                                 model=model,
                                 input_tokens=input_tokens,
@@ -313,5 +365,5 @@ def response(flow: http.HTTPFlow):
                         pass
     except Exception as e:
         print(f"[LEDGER] Failed: {e}", flush=True)
-    
+
     logger.info(f"Response: {flow.response.status_code}")
