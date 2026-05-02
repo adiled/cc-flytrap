@@ -101,31 +101,21 @@ if config_file.exists():
     except Exception as e:
         logger.warning(f"Failed to load config: {e}")
 
-# Behaviour flags. Defaults are deliberately conservative:
-#   pain   = False  → don't touch system prompts (passive observer mode)
-#   ledger = True   → record token/latency telemetry to ~/.local/share/ccft
-PAIN_ENABLED = False
-LEDGER_ENABLED = True
+# Record ledger on/off state at every script load. brainrot reads
+# state.jsonl to distinguish quiet periods from off-periods in the
+# request stream. Failure here is non-fatal — the proxy still runs.
+try:
+    # mitmdump reloads this script but not its imports, so freshly-deployed
+    # ledger.py functions wouldn't be visible without an explicit reload.
+    _reload_ledger_if_needed()
+    ledger_module.record_state(
+        'ledger_on' if LEDGER_ENABLED else 'ledger_off',
+        pain=PAIN_ENABLED,
+    )
+except Exception as e:
+    logger.warning(f"Failed to record ledger state: {e}")
 
-if config_file.exists():
-    try:
-        with open(config_file) as f:
-            config = json.load(f)
-        if config.get('system_override'):
-            SYSTEM_OVERRIDE = config['system_override']
-            logger.info(f"Loaded system_override from {config_file}")
-        else:
-            logger.info("Using default system_override (config is empty)")
-        # Booleans honour explicit JSON false/true; unset keys keep defaults.
-        if 'pain' in config:
-            PAIN_ENABLED = bool(config['pain'])
-        if 'ledger' in config:
-            LEDGER_ENABLED = bool(config['ledger'])
-        logger.info(
-            f"Flags: pain={PAIN_ENABLED} ledger={LEDGER_ENABLED}"
-        )
-    except Exception as e:
-        logger.warning(f"Failed to load config: {e}")
+
 
 
 TRIMMED_BLOCK_2 = "You are a Claude agent, built on Anthropic's Claude Agent SDK."

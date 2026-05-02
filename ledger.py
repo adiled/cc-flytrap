@@ -15,6 +15,7 @@ from urllib.request import urlopen
 from urllib.error import URLError
 
 ledger_file = Path(os.environ.get('CCFT_LEDGER', str(Path.home() / '.local' / 'share' / 'ccft' / 'ledger.jsonl')))
+state_file = ledger_file.parent / 'state.jsonl'
 ledger_file.parent.mkdir(parents=True, exist_ok=True)
 
 # Agent instance info - computed once
@@ -116,6 +117,49 @@ def add(
         f.write(json.dumps(record) + '\n')
     
     return get_stats()
+
+def record_state(event, **extra):
+    """Append a state-transition event to state.jsonl.
+
+    Used by brainrot to know when the ledger was active vs not, so quiet
+    periods in the request stream can be distinguished from off-periods.
+
+    Events:
+      'ledger_on'   ledger recording enabled at script load
+      'ledger_off'  ledger recording disabled at script load
+    """
+    record = {
+        "ts": time.time(),
+        "dt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "event": event,
+        "human": HUMAN,
+        "agent": AGENT_INSTANCE,
+    }
+    record.update(extra)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(state_file, 'a') as f:
+        f.write(json.dumps(record) + '\n')
+
+
+def load_state_events():
+    """Read all state events in chronological order. Empty list if no file."""
+    if not state_file.exists():
+        return []
+    events = []
+    with open(state_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    events.sort(key=lambda e: e.get('ts', 0))
+    return events
+
+
+
 
 def reset():
     if ledger_file.exists():

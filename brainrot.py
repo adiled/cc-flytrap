@@ -112,6 +112,101 @@ def iter_records(since=None, until=None):
         except FileNotFoundError:
             continue
 
+STATE_FILE = LEDGER.parent / 'state.jsonl'
+
+
+def load_state_events():
+    """Read all ledger state-transition events in chronological order."""
+    if not STATE_FILE.exists():
+        return []
+    events = []
+    try:
+        with open(STATE_FILE) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except FileNotFoundError:
+        return []
+    events.sort(key=lambda e: e.get('ts', 0))
+    return events
+
+
+def compute_coverage(events, since, until):
+    """Compute ledger coverage over [since, until].
+
+    Returns a dict:
+      active_s         seconds the ledger was on within the range
+      total_s          total seconds in the range
+      off_intervals    list of (start, end) tuples when ledger was off
+      currently_off    bool — ledger off as of `until`
+      last_event       the most relevant event for status reporting
+      starting_state   'on' or 'off' at `since` (defaults to 'on' when unknown)
+    """
+    total_s = max(0.0, until - since)
+    if not events:
+        return {
+            'active_s': total_s,
+            'total_s': total_s,
+            'off_intervals': [],
+            'currently_off': False,
+            'last_event': None,
+            'starting_state': 'on',
+        }
+
+    last_before = None
+    relevant = []
+    for e in events:
+        ts = e.get('ts', 0)
+        if ts < since:
+            last_before = e
+        elif ts <= until:
+            relevant.append(e)
+
+    starting_state = 'on'
+    if last_before:
+        starting_state = 'on' if last_before.get('event') == 'ledger_on' else 'off'
+
+    active_s = 0.0
+    off_intervals = []
+    cur_state = starting_state
+    cur_start = since
+
+    for e in relevant:
+        ts = e.get('ts', 0)
+        if ts > cur_start:
+            if cur_state == 'on':
+                active_s += ts - cur_start
+            else:
+                off_intervals.append((cur_start, ts))
+        cur_state = 'on' if e.get('event') == 'ledger_on' else 'off'
+        cur_start = ts
+
+    if until > cur_start:
+        if cur_state == 'on':
+            active_s += until - cur_start
+        else:
+            off_intervals.append((cur_start, until))
+
+    last_event = relevant[-1] if relevant else last_before
+    currently_off = bool(last_event and last_event.get('event') == 'ledger_off')
+
+    return {
+        'active_s': active_s,
+        'total_s': total_s,
+        'off_intervals': off_intervals,
+        'currently_off': currently_off,
+        'last_event': last_event,
+        'starting_state': starting_state,
+    }
+
+
+
+
 
 # ─── Time parsing ─────────────────────────────────────────────────────────────
 
@@ -261,6 +356,27 @@ def short_model(m):
     elif len(parts) >= 2 and parts[1].isdigit():
         ver = f"-{parts[1]}"
     return f"{name}{ver}"
+
+
+def render_coverage_line(cov):
+    """Return a one-line coverage string, or '' when coverage is full and ledger is on."""
+    total = cov['total_s'] or 1
+    pct = cov['active_s'] / total * 100
+    n_gaps = len(cov['off_intervals'])
+
+    if cov['currently_off']:
+        if cov['last_event']:
+            since_off = time.time() - cov['last_event'].get('ts', time.time())
+            return red(f"⚠ ledger OFF ({fmt_dur(since_off)} ago)")
+        return red("⚠ ledger OFF")
+    if n_gaps == 0 and pct > 99.9:
+        return ''  # full coverage, nothing to say
+    word = 'gap' if n_gaps == 1 else 'gaps'
+    color = green if pct > 95 else (yellow if pct > 70 else red)
+    return color(f"coverage {fmt_dur(cov['active_s'])} of {fmt_dur(total)} "
+                 f"({pct:.0f}% — {n_gaps} {word})")
+
+
 
 
 def vibe_label(score):
@@ -451,13 +567,23 @@ def cmd_today(args):
     spec = ' '.join(args) if args else 'today'
     since, until, label = parse_range(spec)
     a = aggregate(iter_records(since, until))
+    cov = compute_coverage(load_state_events(), since, until)
 
     print()
     print(bold(f"  brainrot · {label}  "))
     print(grey("  ───────────────────────────────────────────────"))
 
     if a['n'] == 0:
-        print(dim("  (no records — go make some API calls)\n"))
+        if cov['currently_off']:
+            print(red("  ⚠ ledger is OFF — no records being captured"))
+            if cov['last_event']:
+                ago = fmt_dur(time.time() - cov['last_event'].get('ts', time.time()))
+                print(dim(f"     turned off {ago} ago"))
+        elif cov['off_intervals']:
+            print(dim(f"  (no records — ledger was off for {fmt_dur(sum(b-a for a,b in cov['off_intervals']))} of {fmt_dur(cov['total_s'])})"))
+        else:
+            print(dim("  (no records — go make some API calls)"))
+        print()
         return
 
     bot = bot_score(a)
@@ -469,6 +595,10 @@ def cmd_today(args):
     diag = diagnosis(bot, drv)
     if diag:
         print(f"           {dim('↳')} {diag}")
+
+    cov_line = render_coverage_line(cov)
+    if cov_line:
+        print(f"           {dim('↳')} {cov_line}")
 
     avg_lat = a['lat_sum'] / a['n']
     p50 = percentile(a['lats'], 50)
@@ -824,13 +954,17 @@ def cmd_session(args):
 def cmd_week(args):
     since, until, label = parse_range('7d')
     a = aggregate(iter_records(since, until))
+    cov = compute_coverage(load_state_events(), since, until)
 
     print()
     print(bold(f"  brainrot · {label}"))
     print(grey("  ───────────────────────────────────────────────────────────────"))
 
     if a['n'] == 0:
-        print(dim("  (no records this week)\n"))
+        if cov['currently_off']:
+            print(red("  ⚠ ledger is OFF — no records being captured\n"))
+        else:
+            print(dim("  (no records this week)\n"))
         return
 
     bot = bot_score(a)
@@ -842,6 +976,10 @@ def cmd_week(args):
     diag = diagnosis(bot, drv)
     if diag:
         print(f"           {dim('↳')} {diag}")
+
+    cov_line = render_coverage_line(cov)
+    if cov_line:
+        print(f"           {dim('↳')} {cov_line}")
 
     print()
     print(f"  {bold('reqs')}     {a['n']}  {dim('·')}  "
@@ -911,18 +1049,28 @@ def cmd_score(args):
     spec = ' '.join(args) if args else 'today'
     since, until, label = parse_range(spec)
     a = aggregate(iter_records(since, until))
+    cov = compute_coverage(load_state_events(), since, until)
     bot = bot_score(a)
     drv = driver_score(a)
     summary = f"({a['n']} reqs, {fmt_n(a['tot'])} tok)"
+
+    cov_tag = ''
+    if cov['currently_off']:
+        cov_tag = ' · ledger off'
+    elif cov['off_intervals']:
+        pct = cov['active_s'] / (cov['total_s'] or 1) * 100
+        cov_tag = f" · coverage {pct:.0f}%"
+
     diag = diagnosis(bot, drv)
     tail = f" — {diag}" if diag else ''
     if NO_COLOR:
-        print(f"brainrot bot {bot}/100 driver {drv}/100 {summary}{tail}")
+        print(f"brainrot bot {bot}/100 driver {drv}/100 {summary}{cov_tag}{tail}")
     else:
         bcol = green if bot < 40 else (yellow if bot < 70 else red)
         dcol = green if drv < 40 else (yellow if drv < 70 else red)
+        cov_col = red(cov_tag) if 'off' in cov_tag else dim(cov_tag)
         print(f"brainrot bot {bcol(str(bot))}/100 "
-              f"driver {dcol(str(drv))}/100 {dim(summary)}{dim(tail)}")
+              f"driver {dcol(str(drv))}/100 {dim(summary)}{cov_col}{dim(tail)}")
 
 
 # ─── Dispatch ─────────────────────────────────────────────────────────────────
