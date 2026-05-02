@@ -2,7 +2,6 @@
 """
 cc-flytrap - Claude Code System Prompt Stripper
 
-VERSION = "1.0.0"
 
 Intercepts Claude Code's API calls to Anthropic and strips bloated system prompts.
 Instead of removing the identity prefix (which triggers 429s), we trim the verbose

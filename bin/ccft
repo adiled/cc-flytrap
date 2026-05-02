@@ -18,7 +18,7 @@ case "$1" in
     ledger)    exec "$SCRIPT_DIR/ccft-ledger" "${2:-}" ;;
     brainrot)  exec "$SCRIPT_DIR/ccft-brainrot" "${@:2}" ;;
     perf)      exec "$SCRIPT_DIR/ccft-perf" "${@:2}" ;;
-    version|--version|-v) echo "ccft v1.0.0" ;;
+    version|--version|-v) echo "ccft v$(cat "$SCRIPT_DIR/../VERSION")" ;;
     help|--help|-h|"") exec "$SCRIPT_DIR/ccft-help" ;;
     *) echo "Unknown command: $1" >&2; exec "$SCRIPT_DIR/ccft-help" ;;
 esac
