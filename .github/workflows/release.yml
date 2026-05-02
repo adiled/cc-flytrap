@@ -15,7 +15,7 @@ jobs:
 
       - name: Create release package
         run: |
-          tar -czvf cc-flytrap.tar.gz cc-flytrap cc-flytrap.py NOTICE README.md install.sh bin/ ledger.py systemd/
+          tar -czvf cc-flytrap.tar.gz cc-flytrap cc-flytrap.py brainrot.py ledger.py NOTICE README.md LICENSE install.sh bin/
           
       - name: Create GitHub Release
         run: |
