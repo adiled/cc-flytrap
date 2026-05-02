@@ -27,11 +27,8 @@ After install, Claude uses it automatically. Restart Claude if already running.
 
 Two-axis vibe-check on your sessions. Splits **bot drift** (output collapse, latency choke) from **driver drift** (input bloat, rapid-fire, session sprawl). Tells you whose fault.
 
-```
-bot      37/100  — fine
-driver   71/100  — cooked 🔥
-         ↳ prompts are bloating or driver is rapid-firing
-```
+<img width="752" height="486" alt="Screenshot 2026-05-02 at 6 04 06 PM" src="https://github.com/user-attachments/assets/1f160ebb-fd17-4874-a580-cca06a28e5ef" />
+
 
 Behavioural only — derived from velocities, latencies, permutations, and volumetrics in the ledger. Never reads your content.
 
