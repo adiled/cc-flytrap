@@ -263,34 +263,189 @@ def short_model(m):
     return f"{name}{ver}"
 
 
-# ─── Brainrot score ───────────────────────────────────────────────────────────
-
-def brainrot_score(a):
-    if a['n'] == 0:
-        return 0, 'idle'
-    avg_lat = a['lat_sum'] / a['n']
-    avg_in = a['in'] / a['n']
-    p99 = percentile(a['lats'], 99)
-
-    lat_score = min(33, avg_lat / 100)
-    bloat_score = min(33, avg_in / 1500)
-    p99_score = min(34, p99 / 200)
-    score = int(lat_score + bloat_score + p99_score)
-
+def vibe_label(score):
     if score < 20:
-        vibe = 'crisp 🧊'
-    elif score < 40:
-        vibe = 'fine'
-    elif score < 60:
-        vibe = 'mid'
-    elif score < 80:
-        vibe = 'cooked 🔥'
-    else:
-        vibe = 'fried 💀'
-    return score, vibe
+        return 'crisp 🧊'
+    if score < 40:
+        return 'fine'
+    if score < 60:
+        return 'mid'
+    if score < 80:
+        return 'cooked 🔥'
+    return 'fried 💀'
 
 
-# ─── Subcommand: today / range ────────────────────────────────────────────────
+# ─── Signal primitives (V·L·P·V — no content, only behaviour) ─────────────────
+#
+# We never look at request or response text. Everything is derived from
+# four telemetry buckets the ledger already records:
+#
+#   Velocity      inter-request gaps, burstiness, cadence regularity
+#   Latency       p50/p99 distribution, slope of lat~in (choke under load)
+#   Permutation   model thrash, session sprawl, ordering entropy
+#   Volumetrics   token sizes in/out, ratios, distribution shape
+#
+# This lets the score work for ANY driver — human, agent, scheduler, webhook.
+
+def _gaps(a):
+    """Sorted inter-request gaps in seconds."""
+    ts = sorted(r.get('ts', 0) for r in a['records'])
+    return [ts[i+1] - ts[i] for i in range(len(ts)-1)]
+
+
+def _quantile(xs, q):
+    if not xs:
+        return 0
+    s = sorted(xs)
+    k = (len(s) - 1) * q
+    f = int(k)
+    c2 = min(f + 1, len(s) - 1)
+    return s[f] + (s[c2] - s[f]) * (k - f)
+
+
+def _slope(pairs):
+    """OLS slope of y on x. Returns 0 on degenerate input."""
+    n = len(pairs)
+    if n < 3:
+        return 0.0
+    sx = sum(x for x, _ in pairs)
+    sy = sum(y for _, y in pairs)
+    sxx = sum(x*x for x, _ in pairs)
+    sxy = sum(x*y for x, y in pairs)
+    denom = n * sxx - sx * sx
+    if denom == 0:
+        return 0.0
+    return (n * sxy - sx * sy) / denom
+
+
+# ─── Driver-side (V·V·P) ──────────────────────────────────────────────────────
+
+def _driver_bloat(a):
+    """Volumetric: avg input tokens. Pasting 'just in case'. 0..30"""
+    avg_in = a['in'] / a['n'] if a['n'] else 0
+    return min(30, max(0, (avg_in - 1000) / 200))
+
+
+def _driver_rapidfire(a):
+    """Velocity: median inter-request gap. Not reading the answers. 0..25"""
+    g = _gaps(a)
+    if not g:
+        return 0
+    med = _quantile(g, 0.5)
+    if med >= 90:
+        return 0
+    return min(25, (90 - med) / 3.6)
+
+
+def _driver_burst(a):
+    """Velocity: burstiness = p10/median gap. Low = panicked bursts. 0..20"""
+    g = _gaps(a)
+    if len(g) < 5:
+        return 0
+    p10 = _quantile(g, 0.1)
+    med = _quantile(g, 0.5)
+    if med <= 0:
+        return 0
+    ratio = p10 / med
+    return min(20, max(0, (0.3 - ratio) / 0.3 * 20))
+
+
+def _driver_sprawl(a):
+    """Permutation: sessions per hour + model thrash. 0..25"""
+    if not a['first_ts']:
+        return 0
+    span_h = max(1/60, (a['last_ts'] - a['first_ts']) / 3600)
+    sess_count = max(1, len(a['sessions']))
+    sess_per_hour = sess_count / span_h
+    sprawl = min(15, max(0, (sess_per_hour - 2) * 5))
+    n_models = len(a['models'])
+    thrash = min(10, max(0, (n_models - 2) * 5)) if a['n'] > 5 else 0
+    return sprawl + thrash
+
+
+def driver_score(a):
+    """How rotten the steering looks. 0 = clean, 100 = panicking."""
+    if a['n'] == 0:
+        return 0
+    return int(min(100,
+        _driver_bloat(a) + _driver_rapidfire(a)
+        + _driver_burst(a) + _driver_sprawl(a)
+    ))
+
+
+# ─── Bot-side (L·L·V·V) ───────────────────────────────────────────────────────
+
+def _bot_choke(a):
+    """Latency: slope of lat~in. Bot dies on bigger contexts. 0..30"""
+    pairs = [(r.get('in', 0), r.get('lat', 0) or 0) for r in a['records']]
+    slope = _slope(pairs)  # ms per input token
+    return min(30, max(0, (slope - 1) * 7.5))
+
+
+def _bot_spike(a):
+    """Latency: p99/p50 tail-heaviness. Retries or choke events. 0..25"""
+    p50 = percentile(a['lats'], 50)
+    p99 = percentile(a['lats'], 99)
+    if p50 <= 0:
+        return 0
+    ratio = p99 / p50
+    return min(25, max(0, (ratio - 5) * 1.7))
+
+
+def _bot_collapse(a):
+    """Volumetric: avg output tokens. Terse, hedged answers. 0..25"""
+    avg_out = a['out'] / a['n'] if a['n'] else 0
+    if avg_out >= 200:
+        return 0
+    return min(25, (200 - avg_out) / 8)
+
+
+def _bot_hedge(a):
+    """Volumetric: out/in ratio. Bot bailing out. 0..20"""
+    ratio = (a['out'] / a['in']) if a['in'] else 0
+    if ratio >= 0.15:
+        return 0
+    return min(20, (0.15 - ratio) / 0.0075)
+
+
+def bot_score(a):
+    """How rotten the bot's outputs look. 0 = crisp, 100 = fried."""
+    if a['n'] == 0:
+        return 0
+    return int(min(100,
+        _bot_choke(a) + _bot_spike(a)
+        + _bot_collapse(a) + _bot_hedge(a)
+    ))
+
+
+def diagnosis(bot, driver):
+    """Plain-language read of the split. Returns '' when both sides are clean."""
+    if bot < 30 and driver < 30:
+        return ''
+    diff = abs(bot - driver)
+    avg = (bot + driver) / 2
+    if diff < 15:
+        if avg > 60:
+            return "co-rotting — driver and bot are in a feedback loop"
+        if avg > 40:
+            return "drift on both sides; nothing alarming yet"
+        return ''
+    if driver > bot:
+        if driver > 70:
+            return "driver is rotting; bot is keeping up. throttle, refocus."
+        if driver > 50:
+            return "prompts are bloating or driver is rapid-firing"
+        return "driver-side drift; bot is fine"
+    if bot > 70:
+        return "bot is cooked. swap models or clear context."
+    if bot > 50:
+        return "bot output is shrinking or latency is climbing"
+    return "bot-side drift; driver is clean"
+
+
+
+
+
 
 def cmd_today(args):
     spec = ' '.join(args) if args else 'today'
@@ -305,9 +460,15 @@ def cmd_today(args):
         print(dim("  (no records — go make some API calls)\n"))
         return
 
-    score, vibe = brainrot_score(a)
-    score_color = green if score < 40 else yellow if score < 70 else red
-    print(f"  {bold('score')}    {score_color(str(score))}/100  {dim('—')} {vibe}")
+    bot = bot_score(a)
+    drv = driver_score(a)
+    bot_col = green if bot < 40 else (yellow if bot < 70 else red)
+    drv_col = green if drv < 40 else (yellow if drv < 70 else red)
+    print(f"  {bold('bot')}      {bot_col(f'{bot:>3}')}/100  {dim('—')} {vibe_label(bot)}")
+    print(f"  {bold('driver')}   {drv_col(f'{drv:>3}')}/100  {dim('—')} {vibe_label(drv)}")
+    diag = diagnosis(bot, drv)
+    if diag:
+        print(f"           {dim('↳')} {diag}")
 
     avg_lat = a['lat_sum'] / a['n']
     p50 = percentile(a['lats'], 50)
@@ -316,6 +477,7 @@ def cmd_today(args):
     sess_count = len(a['sessions'])
     sess_word = 'session' if sess_count == 1 else 'sessions'
 
+    print()
     print(f"  {bold('reqs')}     {a['n']}  "
           f"{dim('over')} {fmt_dur(span)}  "
           f"{dim('·')} {sess_count} {sess_word}")
@@ -487,8 +649,6 @@ def cmd_replay(args):
             print(dim("\n  bye\n"))
 
 
-# ─── Subcommand: diff ─────────────────────────────────────────────────────────
-
 def cmd_diff(args):
     if len(args) < 2:
         ranges = ['today', 'yesterday']
@@ -518,33 +678,51 @@ def cmd_diff(args):
         col = green if good else (red if abs(pct) > 5 else yellow)
         return (f"{sign}{pct:.0f}%", col)
 
-    score_a, _ = brainrot_score(a)
-    score_b, _ = brainrot_score(b)
+    bot_a, drv_a = bot_score(a), driver_score(a)
+    bot_b, drv_b = bot_score(b), driver_score(b)
     avg_lat_a = (a['lat_sum'] / a['n']) if a['n'] else 0
     avg_lat_b = (b['lat_sum'] / b['n']) if b['n'] else 0
     avg_in_a = (a['in'] / a['n']) if a['n'] else 0
     avg_in_b = (b['in'] / b['n']) if b['n'] else 0
+    avg_out_a = (a['out'] / a['n']) if a['n'] else 0
+    avg_out_b = (b['out'] / b['n']) if b['n'] else 0
     p99_a = percentile(a['lats'], 99)
     p99_b = percentile(b['lats'], 99)
     ratio_a = (a['out'] / a['in']) if a['in'] else 0
     ratio_b = (b['out'] / b['in']) if b['in'] else 0
+    gaps_a = _gaps(a)
+    gaps_b = _gaps(b)
+    med_gap_a = _quantile(gaps_a, 0.5) if gaps_a else 0
+    med_gap_b = _quantile(gaps_b, 0.5) if gaps_b else 0
 
     rows = [
-        ('score',     f"{score_a}/100",     f"{score_b}/100",      delta(score_a, score_b, True)),
-        ('requests',  str(a['n']),          str(b['n']),           delta(a['n'], b['n'], False)),
-        ('total tok', fmt_n(a['tot']),      fmt_n(b['tot']),       delta(a['tot'], b['tot'], False)),
-        ('avg in',    fmt_n(avg_in_a),      fmt_n(avg_in_b),       delta(avg_in_a, avg_in_b, True)),
-        ('avg lat',   f"{int(avg_lat_a)}ms", f"{int(avg_lat_b)}ms", delta(avg_lat_a, avg_lat_b, True)),
-        ('p99 lat',   f"{p99_a}ms",         f"{p99_b}ms",          delta(p99_a, p99_b, True)),
-        ('out/in',    f"{ratio_a:.2f}",     f"{ratio_b:.2f}",      delta(ratio_a, ratio_b, False)),
+        ('bot score', f"{bot_a}/100",         f"{bot_b}/100",         delta(bot_a, bot_b, True)),
+        ('driver',    f"{drv_a}/100",         f"{drv_b}/100",         delta(drv_a, drv_b, True)),
+        ('requests',  str(a['n']),            str(b['n']),            delta(a['n'], b['n'], False)),
+        ('total tok', fmt_n(a['tot']),        fmt_n(b['tot']),        delta(a['tot'], b['tot'], False)),
+        ('avg in',    fmt_n(avg_in_a),        fmt_n(avg_in_b),        delta(avg_in_a, avg_in_b, True)),
+        ('avg out',   fmt_n(avg_out_a),       fmt_n(avg_out_b),       delta(avg_out_a, avg_out_b, False)),
+        ('avg lat',   f"{int(avg_lat_a)}ms",  f"{int(avg_lat_b)}ms",  delta(avg_lat_a, avg_lat_b, True)),
+        ('p99 lat',   f"{p99_a}ms",           f"{p99_b}ms",           delta(p99_a, p99_b, True)),
+        ('out/in',    f"{ratio_a:.2f}",       f"{ratio_b:.2f}",       delta(ratio_a, ratio_b, False)),
+        ('med gap',   fmt_dur(med_gap_a),     fmt_dur(med_gap_b),     delta(med_gap_a, med_gap_b, False)),
         ('sessions',  str(len(a['sessions'])), str(len(b['sessions'])),
-                                                                   delta(len(a['sessions']), len(b['sessions']), False)),
+                                                                      delta(len(a['sessions']), len(b['sessions']), False)),
     ]
 
     print(f"  {'metric':12} {label_a:>14}  {label_b:>14}    drift")
     print(grey("  ───────────────────────────────────────────────────────────────"))
     for label, va, vb, (d, col) in rows:
         print(f"  {label:12} {va:>14}  {vb:>14}    {col(d)}")
+
+    diag_a = diagnosis(bot_a, drv_a)
+    diag_b = diagnosis(bot_b, drv_b)
+    if diag_a or diag_b:
+        print()
+        if diag_a:
+            print(f"  {label_a:>14}  {dim('↳')} {diag_a}")
+        if diag_b:
+            print(f"  {label_b:>14}  {dim('↳')} {diag_b}")
 
     print()
     print(f"  {bold('model mix shift')}")
@@ -643,8 +821,6 @@ def cmd_session(args):
     print()
 
 
-# ─── Subcommand: week ─────────────────────────────────────────────────────────
-
 def cmd_week(args):
     since, until, label = parse_range('7d')
     a = aggregate(iter_records(since, until))
@@ -657,8 +833,17 @@ def cmd_week(args):
         print(dim("  (no records this week)\n"))
         return
 
-    score, vibe = brainrot_score(a)
-    print(f"  {bold('score')}    {score}/100  {dim('—')} {vibe}")
+    bot = bot_score(a)
+    drv = driver_score(a)
+    bot_col = green if bot < 40 else (yellow if bot < 70 else red)
+    drv_col = green if drv < 40 else (yellow if drv < 70 else red)
+    print(f"  {bold('bot')}      {bot_col(f'{bot:>3}')}/100  {dim('—')} {vibe_label(bot)}")
+    print(f"  {bold('driver')}   {drv_col(f'{drv:>3}')}/100  {dim('—')} {vibe_label(drv)}")
+    diag = diagnosis(bot, drv)
+    if diag:
+        print(f"           {dim('↳')} {diag}")
+
+    print()
     print(f"  {bold('reqs')}     {a['n']}  {dim('·')}  "
           f"{fmt_n(a['tot'])} tokens  {dim('·')}  "
           f"{len(a['sessions'])} sessions")
@@ -722,19 +907,22 @@ def cmd_week(args):
     print()
 
 
-# ─── Subcommand: score ────────────────────────────────────────────────────────
-
 def cmd_score(args):
     spec = ' '.join(args) if args else 'today'
     since, until, label = parse_range(spec)
     a = aggregate(iter_records(since, until))
-    score, vibe = brainrot_score(a)
+    bot = bot_score(a)
+    drv = driver_score(a)
     summary = f"({a['n']} reqs, {fmt_n(a['tot'])} tok)"
+    diag = diagnosis(bot, drv)
+    tail = f" — {diag}" if diag else ''
     if NO_COLOR:
-        print(f"brainrot {score}/100 {vibe} {summary}")
+        print(f"brainrot bot {bot}/100 driver {drv}/100 {summary}{tail}")
     else:
-        col = green if score < 40 else (yellow if score < 70 else red)
-        print(f"brainrot {col(str(score))}/100 {vibe} {dim(summary)}")
+        bcol = green if bot < 40 else (yellow if bot < 70 else red)
+        dcol = green if drv < 40 else (yellow if drv < 70 else red)
+        print(f"brainrot bot {bcol(str(bot))}/100 "
+              f"driver {dcol(str(drv))}/100 {dim(summary)}{dim(tail)}")
 
 
 # ─── Dispatch ─────────────────────────────────────────────────────────────────
