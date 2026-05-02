@@ -1,46 +1,68 @@
 #!/usr/bin/env bash
 #
-# ccft-update - Self-update to latest version
+# ccft-update - Self-update to latest released version
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+source "$SCRIPT_DIR/ccft-lib"
 
 REPO="adiled/cc-flytrap"
-CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CURRENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "Checking for updates..."
 
-# Get latest release tag
-latest=$(curl -sS "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
+latest=$(curl -sS "https://api.github.com/repos/$REPO/releases/latest" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))')
 
 if [ -z "$latest" ]; then
-    echo "Failed to fetch latest version"
+    echo "Failed to fetch latest version" >&2
     exit 1
 fi
 
 echo "Latest version: $latest"
 
-# Download tarball
 tmp=$(mktemp -d)
-url="https://github.com/$REPO/archive/refs/tags/$latest.tar.gz"
-curl -sSL "$url" -o "$tmp/ccft.tar.gz"
-tar -xzf "$tmp/ccft.tar.gz" -C "$tmp"
+trap 'rm -rf "$tmp"' EXIT
 
-# Backup current
+# Prefer the flat release asset (built by CI). Fall back to the GH source
+# tarball if the asset is missing — that one nests under a versioned dir.
+asset_url="https://github.com/$REPO/releases/download/$latest/cc-flytrap.tar.gz"
+src_url="https://github.com/$REPO/archive/refs/tags/$latest.tar.gz"
+
+if curl -fsSLI "$asset_url" >/dev/null 2>&1; then
+    log_info "Downloading release asset..."
+    curl -fsSL "$asset_url" -o "$tmp/ccft.tar.gz"
+    mkdir -p "$tmp/extract"
+    tar -xzf "$tmp/ccft.tar.gz" -C "$tmp/extract"
+    payload_dir="$tmp/extract"
+else
+    log_warn "Release asset missing; falling back to source tarball"
+    curl -fsSL "$src_url" -o "$tmp/ccft.tar.gz"
+    mkdir -p "$tmp/extract"
+    tar -xzf "$tmp/ccft.tar.gz" -C "$tmp/extract" --strip-components=1
+    payload_dir="$tmp/extract"
+fi
+
+if [ ! -e "$payload_dir/cc-flytrap.py" ]; then
+    log_err "Downloaded archive does not contain cc-flytrap.py — aborting"
+    exit 1
+fi
+
 backup="$CURRENT_DIR.backup.$(date +%Y%m%d_%H%M%S)"
 cp -r "$CURRENT_DIR" "$backup"
-echo "Backed up to: $backup"
+log_info "Backed up to: $backup"
 
-# Replace files (excluding user data and git)
-rsync -a --exclude='.git' --exclude='logs' --exclude='.ccft.pid' \
+rsync -a --delete \
+    --exclude='.git' --exclude='logs' --exclude='.ccft.pid' \
     --exclude='ledger.jsonl' --exclude='archive' \
-    "$tmp/cc-flytrap-archive/"* "$CURRENT_DIR/"
+    "$payload_dir/" "$CURRENT_DIR/"
 
-rm -rf "$tmp"
-
-# Clean up stale files
+# Clean up files that no longer ship in the release
 rm -f "$CURRENT_DIR/ccft" "$CURRENT_DIR/install.sh"
 log_info "Cleaned up deprecated files"
 
-echo "Updated to $latest"
-echo "Restarting service..."
+log_info "Updated to $latest"
+log_info "Restarting service..."
 if [ "$(uname -s)" = "Darwin" ]; then
     launchctl unload ~/Library/LaunchAgents/com.ccft.plist 2>/dev/null || true
     launchctl load ~/Library/LaunchAgents/com.ccft.plist 2>/dev/null || true
