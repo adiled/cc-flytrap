@@ -638,7 +638,7 @@ def cmd_today(args):
 
     if a['by_hour']:
         print()
-        print(f"  {bold('by hour')}  {grey('00         06         12         18         23')}")
+        print(f"  {bold('by hour')}  {grey('00    06    12    18  23')}")
         line = "           "
         for h in range(24):
             hb = a['by_hour'].get(h)
