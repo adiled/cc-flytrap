@@ -12,12 +12,7 @@ Install cc-flytrap from https://github.com/adiled/cc-flytrap
 
 ## Use
 
-Claude uses it automatically after install. Or:
-
-```bash
-HTTP_PROXY=127.0.0.1:7178 HTTPS_PROXY=127.0.0.1:7178 \
-  NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-cert.pem claude -p "hi"
-```
+After install, Claude uses it automatically. Restart Claude if already running.
 
 ## Commands
 
