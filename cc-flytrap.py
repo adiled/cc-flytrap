@@ -24,10 +24,12 @@ Blocks modified:
 Total reduction: 4058 -> ~480 words (~88% savings)
 """
 
+import hashlib
 import json
 import logging
 import sys
 import os
+import re
 import time
 import importlib
 from pathlib import Path
@@ -101,6 +103,48 @@ TRIMMED_BLOCK_4 = """# Text output (does not apply to tool calls)
 Assume users can't see most tool calls or thinking — only your text output. Before your first tool call, state in one sentence what you're about to do. While working, give short updates at key moments: when you find something, when you change direction, or when you hit a blocker. Brief is good — silent is not. One sentence per update is almost always enough."""
 
 
+_SESSION_IN_USER_ID = re.compile(r'_session_([0-9a-f][0-9a-f-]{6,})')
+
+
+def extract_session_id(flow, data=None):
+    """Pull a stable session id from the request.
+
+    Tries headers first (cheap), then the messages-API metadata block.
+    Claude Code's `metadata.user_id` typically embeds the session uuid as
+    `..._session_<uuid>`; we extract it. Falls back to a short hash of
+    `user_id` so we still get a stable bucket per logical caller.
+    """
+    for h in ('anthropic-session-id', 'x-session-id', 'x-anthropic-session-id'):
+        v = flow.request.headers.get(h)
+        if v:
+            return v
+
+    if data is None:
+        try:
+            data = json.loads(flow.request.content.decode('utf-8'))
+        except Exception:
+            return None
+
+    meta = data.get('metadata') if isinstance(data, dict) else None
+    if not isinstance(meta, dict):
+        return None
+
+    sid = meta.get('session_id') or meta.get('sessionId')
+    if sid:
+        return sid
+
+    uid = meta.get('user_id') or ''
+    m = _SESSION_IN_USER_ID.search(uid)
+    if m:
+        return m.group(1)
+    if uid:
+        return 'u-' + hashlib.sha1(uid.encode()).hexdigest()[:16]
+
+    return None
+
+
+
+
 def request(flow: http.HTTPFlow):
     """Intercept and modify Anthropic /v1/messages API calls."""
     _reload_ledger_if_needed()
@@ -117,6 +161,12 @@ def request(flow: http.HTTPFlow):
     try:
         body = flow.request.content.decode("utf-8")
         data = json.loads(body)
+
+        # Stash session id on the flow so response() doesn't re-parse the body.
+        sid = extract_session_id(flow, data)
+        if sid:
+            flow.metadata['ccft_session_id'] = sid
+
         system = data.get("system", [])
         
         if not isinstance(system, list):
@@ -217,8 +267,11 @@ def response(flow: http.HTTPFlow):
                                 # Try to get region from hostname (e.g., api.anthropic.com -> extract from DNS)
                                 pass  # Region requires GeoIP, leave as None for now
                             
-                            # Session ID - try to extract from headers
-                            session_id = flow.request.headers.get("anthropic-sessions", None)
+                            # Session id: prefer the one stashed by request(); fall back to a
+                            # fresh extraction (e.g. if request() bailed before stashing).
+                            session_id = flow.metadata.get('ccft_session_id')
+                            if not session_id:
+                                session_id = extract_session_id(flow)
                             
                             latency_ms = int((flow.response.timestamp_end - flow.response.timestamp_start) * 1000)
                             
@@ -235,7 +288,8 @@ def response(flow: http.HTTPFlow):
                                 timestamp_start=flow.request.timestamp_start,
                                 timestamp_end=flow.response.timestamp_end
                             )
-                            logger.info(f"LEDGER: in:{input_tokens} out:{output_tokens} latency:{latency_ms}ms total:{stats['total_requests']} reqs")
+                            sid_tag = f" sid:{session_id[:8]}" if session_id else ""
+                            logger.info(f"LEDGER: in:{input_tokens} out:{output_tokens} latency:{latency_ms}ms{sid_tag} total:{stats['total_requests']} reqs")
                             break
                     except:
                         pass
