@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#
+# ccft-restart - Bounce flytrap, owner-aware.
+#
+# Prefers in-place bounce when the supervisor supports it (lower latency,
+# no race window where a second start could lose):
+#   launchd → launchctl kickstart -k gui/<uid>/com.ccft
+#   systemd → systemctl --user restart
+#   manual  → stop + start
+#
+# Falls back to stop+start when kickstart isn't available.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/ccft-lib"
+load_config
+
+state=$(flytrap_state)
+owner=$(echo "$state" | cut -d'|' -f1)
+
+bounce_via_stop_start() {
+    "$SCRIPT_DIR/ccft-stop"
+    "$SCRIPT_DIR/ccft-start"
+}
+
+case "$owner" in
+    launchd)
+        uid=$(id -u)
+        if launchctl kickstart -k "gui/$uid/${FLYTRAP_LAUNCHD_LABEL}" 2>/dev/null; then
+            echo "Restarted launchd unit ($FLYTRAP_LAUNCHD_LABEL)"
+            exit 0
+        fi
+        echo "kickstart unavailable, falling back to stop+start"
+        bounce_via_stop_start
+        ;;
+    systemd)
+        if systemctl --user restart "$FLYTRAP_SYSTEMD_UNIT" 2>/dev/null; then
+            echo "Restarted systemd unit (${FLYTRAP_SYSTEMD_UNIT})"
+            exit 0
+        fi
+        bounce_via_stop_start
+        ;;
+    manual|launchd-idle|systemd-idle|none)
+        bounce_via_stop_start
+        ;;
+    *)
+        log_err "Unknown owner state: $owner"
+        exit 1
+        ;;
+esac

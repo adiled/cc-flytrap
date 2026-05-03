@@ -5,7 +5,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/ccft-lib"
 load_config
-check_deps check_files
+check_deps
+check_files
 
 mkdir -p "$HOME/.config/ccft"
 if [ ! -f "$HOME/.config/ccft/ccft.json" ]; then

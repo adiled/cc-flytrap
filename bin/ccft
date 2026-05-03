@@ -10,6 +10,7 @@ source "$SCRIPT_DIR/ccft-lib"
 case "$1" in
     start)      exec "$SCRIPT_DIR/ccft-start" ;;
     stop)      exec "$SCRIPT_DIR/ccft-stop" ;;
+    restart)   exec "$SCRIPT_DIR/ccft-restart" ;;
     status)    exec "$SCRIPT_DIR/ccft-status" ;;
     test)      exec "$SCRIPT_DIR/ccft-test" ;;
     install)   exec "$SCRIPT_DIR/ccft-install" ;;

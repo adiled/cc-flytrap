@@ -1,32 +1,91 @@
 #!/usr/bin/env bash
 #
-# ccft-start - Start flytrap
+# ccft-start - Start flytrap (idempotent, owner-aware).
+#
+# Behavior depends on which lifecycle owner is detected:
+#   launchd-idle   → launchctl load (let launchd spawn it)
+#   systemd-idle   → systemctl --user start
+#   none           → spawn mitmdump in background, write pid file
+#   already-running (launchd/systemd/manual) → no-op, report status
+#
+# Designed to be safe to run repeatedly. Never double-spawns.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/ccft-lib"
 load_config
+check_deps
 check_files
 
-echo "Starting flytrap on $PROXY_HOST:$PROXY_PORT..."
+state=$(flytrap_state)
+owner=$(echo "$state" | cut -d'|' -f1)
+pid=$(echo "$state"   | cut -d'|' -f2)
+port_pids=$(echo "$state" | cut -d'|' -f3)
 
-existing=$(lsof -ti:$PROXY_PORT 2>/dev/null)
-if [ -n "$existing" ]; then
-    echo "Flytrap already running on port $PROXY_PORT (PID $existing)"
-    exit 0
-fi
+case "$owner" in
+    launchd|systemd|manual)
+        echo "Already running on $PROXY_HOST:$PROXY_PORT (PID $pid, owner: $owner)"
+        exit 0
+        ;;
+    launchd-idle)
+        plist="$HOME/Library/LaunchAgents/${FLYTRAP_LAUNCHD_LABEL}.plist"
+        if [ ! -f "$plist" ]; then
+            log_err "launchd unit registered but plist missing: $plist"
+            log_step "Reinstall with: ccft install"
+            exit 1
+        fi
+        echo "Loading launchd unit ($FLYTRAP_LAUNCHD_LABEL)..."
+        launchctl load "$plist"
+        ;;
+    systemd-idle)
+        echo "Starting systemd unit (${FLYTRAP_SYSTEMD_UNIT})..."
+        systemctl --user start "$FLYTRAP_SYSTEMD_UNIT"
+        ;;
+    none)
+        if [ -n "$port_pids" ]; then
+            log_err "Port $PROXY_PORT held by foreign process (PID $port_pids); cannot start"
+            log_step "Free the port or change 'port' in ~/.config/ccft/ccft.json"
+            exit 1
+        fi
+        echo "Starting flytrap on $PROXY_HOST:$PROXY_PORT (manual mode)..."
+        mkdir -p "$FLYTRAP_RUN_DIR"
+        manual_log="$FLYTRAP_RUN_DIR/manual.${PROXY_PORT}.log"
+        # Redirect to a port-scoped log so failures are diagnosable.
+        # Without this, mitmdump errors (missing cert, port conflict,
+        # broken script) vanish into /dev/null and `start` reports a
+        # cryptic "did not bind port" with no clue why.
+        mitmdump -p "$PROXY_PORT" -s "$SCRIPT_DIR/../cc-flytrap.py" --set script.reloader=true >"$manual_log" 2>&1 &
+        new_pid=$!
+        echo "$new_pid" > "$(flytrap_pid_file)"
+        ;;
+    *)
+        log_err "Unknown owner state: $owner"
+        exit 1
+        ;;
+esac
 
-pid_file="$SCRIPT_DIR/../.ccft.pid"
-[ -f "$pid_file" ] && rm -f "$pid_file"
+# Wait briefly for it to actually bind the port (up to ~3s)
+for _ in 1 2 3 4 5 6; do
+    sleep 0.5
+    state=$(flytrap_state)
+    owner=$(echo "$state" | cut -d'|' -f1)
+    pid=$(echo "$state"   | cut -d'|' -f2)
+    case "$owner" in
+        launchd|systemd|manual)
+            echo "Started on $PROXY_HOST:$PROXY_PORT (PID $pid, owner: $owner)"
+            exit 0
+            ;;
+    esac
+done
 
-mitmdump -p $PROXY_PORT -s "$SCRIPT_DIR/../cc-flytrap.py" --set script.reloader=true 2>&1 &
-pid=$!
-echo $pid > "$pid_file"
-sleep 1
-
-if kill -0 $pid 2>/dev/null; then
-    echo "Started (PID $pid)"
-else
-    rm -f "$pid_file"
-    echo "Failed to start" >&2
-    exit 1
-fi
+log_err "Started owner=$owner but it did not bind port $PROXY_PORT in time"
+case "$owner" in
+    none|manual)
+        log_step "Manual log: $FLYTRAP_RUN_DIR/manual.${PROXY_PORT}.log"
+        ;;
+    *)
+        log_step "Service log: $HOME/.local/share/ccft/logs/launchd.log"
+        ;;
+esac
+# Clean up the stale pid file we wrote so the next 'status' isn't lying
+rm -f "$(flytrap_pid_file)"
+exit 1

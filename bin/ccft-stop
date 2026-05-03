@@ -1,19 +1,71 @@
 #!/usr/bin/env bash
 #
-# ccft-stop - Stop flytrap
+# ccft-stop - Stop flytrap (owner-aware).
+#
+# In managed mode (launchd/systemd) we must unload the unit, otherwise the
+# OS supervisor will respawn the process the moment we kill it.
+#
+#   launchd → launchctl unload (plist remains; `ccft start` reloads)
+#   systemd → systemctl --user stop
+#   manual  → kill the pid we wrote
+#
+# After stopping, we sweep any leftover process holding the port (defense
+# against zombies / orphaned mitmdump children).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/ccft-lib"
 load_config
 
-echo "Stopping flytrap..."
+state=$(flytrap_state)
+owner=$(echo "$state" | cut -d'|' -f1)
+pid=$(echo "$state"   | cut -d'|' -f2)
+port_pids=$(echo "$state" | cut -d'|' -f3)
 
-pid_file="$SCRIPT_DIR/../.ccft.pid"
-if [ -f "$pid_file" ]; then
-    pid=$(cat "$pid_file" 2>/dev/null)
-    [ -n "$pid" ] && kill $pid 2>/dev/null
-    rm -f "$pid_file"
+case "$owner" in
+    launchd)
+        plist="$HOME/Library/LaunchAgents/${FLYTRAP_LAUNCHD_LABEL}.plist"
+        echo "Unloading launchd unit ($FLYTRAP_LAUNCHD_LABEL)..."
+        launchctl unload "$plist" 2>/dev/null || true
+        ;;
+    launchd-idle)
+        echo "launchd unit registered but already idle — nothing to stop"
+        ;;
+    systemd)
+        echo "Stopping systemd unit (${FLYTRAP_SYSTEMD_UNIT})..."
+        systemctl --user stop "$FLYTRAP_SYSTEMD_UNIT" 2>/dev/null || true
+        ;;
+    systemd-idle)
+        echo "systemd unit registered but already inactive — nothing to stop"
+        ;;
+    manual)
+        echo "Stopping manual flytrap (PID $pid)..."
+        kill "$pid" 2>/dev/null || true
+        rm -f "$(flytrap_pid_file)"
+        ;;
+    none)
+        if [ -z "$port_pids" ]; then
+            echo "Not running"
+            exit 0
+        fi
+        echo "Sweeping foreign process(es) holding port $PROXY_PORT (PID $port_pids)..."
+        ;;
+esac
+
+# Final sweep: anything still holding the port gets killed.
+# Bounded retry — give the supervisor a moment to release.
+for _ in 1 2 3 4; do
+    leftover=$(lsof -ti:"$PROXY_PORT" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ *$//')
+    [ -z "$leftover" ] && break
+    # shellcheck disable=SC2086
+    kill $leftover 2>/dev/null || true
+    sleep 0.4
+done
+
+leftover=$(lsof -ti:"$PROXY_PORT" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ *$//')
+if [ -n "$leftover" ]; then
+    log_warn "Port $PROXY_PORT still held by PID $leftover after stop"
+    exit 1
 fi
 
-lsof -ti:$PROXY_PORT | xargs kill 2>/dev/null || true
+_pf="$(flytrap_pid_file)"; [ -f "$_pf" ] && rm -f "$_pf"
 echo "Stopped"
