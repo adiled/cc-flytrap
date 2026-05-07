@@ -1,11 +1,14 @@
-//! BRAINROT panel — chart + tile row, no border, range chips with outlined
-//! pink rect on the active preset.
+//! BRAINROT panel — chart only. Range chips at top, chart suspended in
+//! darkness with generous padding. The metrics strip (BOT/DRIVER/P99/CACHE)
+//! used to live here; it now lives in panels::metrics so the brainrot
+//! panel can read as a wide, broadcast-feeling chart instead of a
+//! chart-plus-tile dashboard card.
 
-use crate::brainrot::aggregate::{bot_score, driver_score, vibe_label, Aggregate};
-use crate::ledger_read::{percentile, Record};
+use crate::brainrot::aggregate::{bot_score, driver_score, Aggregate};
+use crate::ledger_read::Record;
 use crate::tui::style;
 use crate::tui::{App, RangePreset};
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
@@ -13,30 +16,46 @@ use ratatui::widgets::{Axis, Chart, Dataset, GraphType, Paragraph};
 use ratatui::Frame;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let inner = style::panel(f, area, "brainrot");
+
+    // Internal split: 16% header (subtitle + range chips), 68% chart,
+    // 16% xaxis labels (the chart owns its own xaxis row, but the bottom
+    // padding in this split keeps the chart from touching the panel border).
+    // Combined with the LEFT/RIGHT padding below, the graph feels suspended
+    // in darkness rather than wedged into the chrome.
+    let h = inner.height as i32;
+    // Use floor + remainder to stay integer-clean for tiny heights.
+    let header_h = ((h as f32) * 0.16).round() as u16;
+    let bottom_h = ((h as f32) * 0.16).round() as u16;
+    let chart_h = inner.height.saturating_sub(header_h + bottom_h);
     let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(13), Constraint::Length(7)])
-        .split(area);
-
-    let chart_inner = style::panel(f, split[0], "brainrot");
-    // 3-row chip area + chart. The 3 rows give selected chips room for a
-    // real signal-bordered rectangle (top edge, text+sides, bottom edge).
-    let chart_layout = Layout::default()
-        .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // subtitle + chips (with selected outline)
-            Constraint::Min(0),    // chart
+            Constraint::Length(header_h.max(2)),
+            Constraint::Length(chart_h),
+            Constraint::Length(bottom_h),
         ])
-        .split(chart_inner);
-    range_chips(f, chart_layout[0], app);
-    chart(f, chart_layout[1], app);
+        .split(inner);
 
-    let tile_inner = style::panel(f, split[1], "");
-    tiles(f, tile_inner, app);
-    // Tile dividers span the full TILE PANEL height (including chrome rows)
-    // so they read as part of the same chrome family. Drawn on the parent
-    // split[1] so they extend through the panel borders, not just the inner.
-    paint_tile_dividers(f, split[1], app);
+    // Horizontal padding for the chart: left 3 cols, right 2 cols. Suspends
+    // the plot away from the panel chrome so the borders breathe.
+    let chart_area = pad_horizontal(split[1], 3, 2);
+
+    range_chips(f, split[0], app);
+    chart(f, chart_area, app);
+}
+
+fn pad_horizontal(area: Rect, left: u16, right: u16) -> Rect {
+    let pad = left + right;
+    if area.width <= pad {
+        return area;
+    }
+    Rect {
+        x: area.x + left,
+        y: area.y,
+        width: area.width - pad,
+        height: area.height,
+    }
 }
 
 fn range_chips(f: &mut Frame, area: Rect, app: &App) {
@@ -48,19 +67,25 @@ fn range_chips(f: &mut Frame, area: Rect, app: &App) {
         (RangePreset::All, "all"),
     ];
 
-    // Compute the chip strip width (sum of " short " + space-separator).
     let chip_strip_width: u16 = presets
         .iter()
         .map(|(_, s)| s.chars().count() as u16 + 3)
         .sum::<u16>()
         + 1;
 
-    // The 3-row chip area: top row reserved for outline top edges, middle
-    // row holds subtitle + chip text, bottom row reserved for outline
-    // bottom edges. Render content on the middle row only.
+    // Header area is now only ~2 rows tall at most (16% of the chart panel).
+    // We render the subtitle + chip text on the LAST visible row so the
+    // active-chip outline (3 rows tall) fits when there's headroom.
+    if area.height < 1 {
+        return;
+    }
+    // The mid_row is the last row of the header area. The active chip
+    // outline draws into the row above and below, so when area.height < 3
+    // the outline simply truncates — the text still renders.
+    let mid_y = area.y + area.height.saturating_sub(1);
     let mid_row = Rect {
         x: area.x,
-        y: area.y + 1,
+        y: mid_y,
         width: area.width,
         height: 1,
     };
@@ -84,14 +109,8 @@ fn range_chips(f: &mut Frame, area: Rect, app: &App) {
     let mut cursor_x = row[1].x;
     for (preset, short) in presets {
         let active = app.range_preset == *preset;
-        // 2-cell horizontal padding ("  short  ") visually balances the
-        // 1-row vertical padding because terminal cells are ~2× taller
-        // than they are wide. Equal-feeling padding all around the chip.
         let label = format!("  {}  ", short);
         let w = label.chars().count() as u16;
-        // Active chip text uses bright cyan; the solid cyan outline (drawn
-        // below) provides the "selected" visual signal without competing
-        // with the streaky panel chrome.
         let text_style = if active {
             Style::default().fg(style::CYAN)
         } else {
@@ -112,31 +131,25 @@ fn range_chips(f: &mut Frame, area: Rect, app: &App) {
     }
     f.render_widget(Paragraph::new(Line::from(spans)), row[1]);
 
-    // Active chip → 3-row solid-cyan rounded rectangle. Different
-    // thematics from the panel chrome (which uses streaky signal):
-    // chips are buttons, not container chrome, so a clean uniform
-    // outline reads as "selectable element" rather than blending in.
-    for (text_rect, active) in chip_text_rects {
-        if !active {
-            continue;
+    // Active chip — solid cyan rectangle. Only fits when the header
+    // section has at least 3 rows of headroom.
+    if area.height >= 3 {
+        for (text_rect, active) in chip_text_rects {
+            if !active {
+                continue;
+            }
+            let outline = Rect {
+                x: text_rect.x,
+                y: text_rect.y.saturating_sub(1),
+                width: text_rect.width,
+                height: 3,
+            };
+            style::solid_rect(f.buffer_mut(), outline, style::CYAN);
         }
-        let outline = Rect {
-            x: text_rect.x,
-            y: text_rect.y.saturating_sub(1),
-            width: text_rect.width,
-            height: 3,
-        };
-        style::solid_rect(f.buffer_mut(), outline, style::CYAN);
     }
 }
 
-// (helper removed: spans_width was only used by the old chip layout)
-
 fn chart(f: &mut Frame, area: Rect, app: &App) {
-    // True time-series: x-axis is epoch seconds across the active range.
-    // Bucket the in-memory records by time, aggregate each bucket, plot the
-    // resulting (bucket_midpoint_epoch, score) points. Empty buckets are
-    // skipped so the line interpolates over gaps instead of dropping to 0.
     let bucket_count = ((area.width as usize).saturating_sub(8)).max(20);
     let span = (app.range.until - app.range.since).max(1.0);
     let bucket_s = span / bucket_count as f64;
@@ -176,10 +189,6 @@ fn chart(f: &mut Frame, area: Rect, app: &App) {
             .data(&drv_pts),
     ];
 
-    // Three evenly-spaced labels across the range. ratatui's Axis widget
-    // has a documented bug at >3 labels where middle labels collapse —
-    // 3 is the upstream-supported maximum for both axes. (See ratatui
-    // chart.rs comment at the labels() docstring.)
     let n_labels = 3;
     let span_secs = (app.range.until - app.range.since).max(1.0);
     let x_labels: Vec<Span> = (0..n_labels)
@@ -213,128 +222,16 @@ fn chart(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn tiles(f: &mut Frame, area: Rect, app: &App) {
-    let bot = bot_score(&app.agg);
-    let drv = driver_score(&app.agg);
-    let mut lats = app.agg.lats.clone();
-    let p99 = percentile(&mut lats, 99.0) as u64;
-    let cache_total = app.agg.records.iter().map(|r| r.cr + r.cc).sum::<u64>();
-    let cache_read = app.agg.records.iter().map(|r| r.cr).sum::<u64>();
-    let cache_pct = if cache_total > 0 {
-        cache_read as f64 / cache_total as f64 * 100.0
-    } else {
-        0.0
-    };
-
-    let cells = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-        ])
-        .split(area);
-
-    tile(f, cells[0], "BOT", &bot.to_string(), &vibe_label(bot).to_string(), Some(bot), style::PINK);
-    tile(f, cells[1], "DRIVER", &drv.to_string(), &vibe_label(drv).to_string(), Some(drv), style::CYAN);
-    tile(f, cells[2], "P99 LAT", &format!("{}ms", p99), "p99", None, style::GOLD);
-    tile(
-        f,
-        cells[3],
-        "CACHE",
-        &format!("{:.0}%", cache_pct),
-        "reuse",
-        None,
-        style::LIME,
-    );
-}
-
-/// Paint signal-themed vertical dividers between the four tiles. The
-/// dividers span the full TILE PANEL height (including the chrome rows)
-/// so they read as part of the same chrome family as the panel border.
-fn paint_tile_dividers(f: &mut Frame, panel_area: Rect, app: &App) {
-    let _ = app;
-    // Re-derive the inner-area split that `tiles()` used so we know where
-    // the boundaries between tile cells live.
-    let inner = Rect {
-        x: panel_area.x + 1,
-        y: panel_area.y + 1,
-        width: panel_area.width.saturating_sub(2),
-        height: panel_area.height.saturating_sub(2),
-    };
-    let cells = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-        ])
-        .split(inner);
-
-    for (i, cell) in cells.iter().enumerate().take(cells.len() - 1) {
-        let x = cell.x + cell.width;
-        if x >= panel_area.x + panel_area.width || x < panel_area.x {
-            continue;
-        }
-        // Span from one row below the panel's top edge to one row above
-        // the bottom edge — same vertical extent as the visible chrome.
-        let y = panel_area.y + 1;
-        let height = panel_area.height.saturating_sub(2);
-        let seed = format!("tile-div-{}-{}", i, x);
-        style::signal_divider_v(f.buffer_mut(), x, y, height, &seed);
-    }
-}
-
-fn tile(
-    f: &mut Frame,
-    area: Rect,
-    label: &str,
-    value: &str,
-    sub: &str,
-    score: Option<u32>,
-    label_color: ratatui::style::Color,
-) {
-    let value_color = match score {
-        Some(s) => style::score_color(s),
-        None => label_color,
-    };
-    let lines = vec![
-        Line::from(Span::styled(
-            label.to_string(),
-            Style::default().fg(label_color).add_modifier(ratatui::style::Modifier::BOLD),
-        ))
-        .alignment(Alignment::Center),
-        Line::from(Span::styled(
-            value.to_string(),
-            Style::default()
-                .fg(value_color)
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        ))
-        .alignment(Alignment::Center),
-        Line::from(Span::styled(sub.to_string(), style::dim())).alignment(Alignment::Center),
-    ];
-    // Vertically center the 3-line content block within the tile cell.
-    // ratatui's Rect::centered_vertically does this responsively — when the
-    // tile is short, the content shrinks to fit; when tall, it floats centered.
-    let content_area = area.centered_vertically(Constraint::Length(3));
-    f.render_widget(Paragraph::new(lines), content_area);
-}
-
 fn axis_label(epoch: f64, span_secs: f64) -> String {
     let secs = epoch as i64;
     let dt = time::OffsetDateTime::from_unix_timestamp(secs)
         .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
         .to_offset(crate::tui::style::local_offset());
     if span_secs < 36.0 * 3600.0 {
-        // Sub-day → HH:MM
         format!("{:02}:{:02}", dt.hour(), dt.minute())
     } else if span_secs < 30.0 * 86400.0 {
-        // Up to a month → M/D
         format!("{}/{:02}", u8::from(dt.month()), dt.day())
     } else {
-        // Longer → ISO-ish date
         format!(
             "{}-{:02}-{:02}",
             dt.year(),

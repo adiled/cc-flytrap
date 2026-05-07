@@ -1,4 +1,8 @@
 //! DIAGNOSIS — vibe label + diagnosis() + peaks/models summary.
+//!
+//! Text deliberately clustered in the upper-left of the panel; the rest
+//! is intentional negative space. The brief: emptiness is the point —
+//! diagnostics dominates by what it doesn't fill, not by what it shows.
 
 use crate::brainrot::aggregate::{bot_score, diagnosis, driver_score, short_model, vibe_label};
 use crate::tui::style;
@@ -88,5 +92,19 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         ]));
     }
 
-    f.render_widget(Paragraph::new(lines), inner);
+    // Cluster text into the upper-left ~half of the panel. The Paragraph
+    // doesn't wrap, so lines keep their natural width, but we constrain
+    // the render rect to enforce that the lower-right is left empty even
+    // when content could fit. The emptiness is the point.
+    let line_count = lines.len() as u16;
+    let text_h = (line_count + 1).min(inner.height);
+    let text_w = (inner.width.saturating_mul(3) / 5).max(40).min(inner.width);
+    let text_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: text_w,
+        height: text_h,
+    };
+
+    f.render_widget(Paragraph::new(lines), text_area);
 }

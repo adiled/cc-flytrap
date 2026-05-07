@@ -270,43 +270,60 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
 fn body(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
     use ratatui::layout::{Constraint, Direction, Layout};
 
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
+    // Three columns: left rail / center / right ledger.
+    //
+    // Ratios per the layout brief: 14% / 64% / 22%. The center column's
+    // geometric mid-point lands at 14% + 64%/2 = 46% of screen, which is
+    // 4% LEFT of screen mid (50%). That's the intentional left bias —
+    // composition reads as broadcast/surveillance rather than enterprise
+    // grid. Perfect centering kills the cinematic feel.
+    //
+    //   left rail (14%)   = SYSTEM / MODELS / HEAT / STREAM   "machine room"
+    //   center    (64%)   = BRAINROT / METRICS / DIAGNOSTICS  cinematic
+    //   right     (22%)   = LEDGER (full height)              "surveilling"
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Min(14),  // top row (PROXY/MODELS/HEAT | BRAINROT | LEDGER)
-            Constraint::Min(7),   // bottom row (STREAM | DIAGNOSIS)
+            Constraint::Percentage(14),
+            Constraint::Percentage(64),
+            Constraint::Percentage(22),
         ])
         .split(area);
 
-    let top = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(22), // left stack
-            Constraint::Min(40),    // brainrot center
-            Constraint::Length(34), // ledger right
-        ])
-        .split(rows[0]);
-
-    let left_stack = Layout::default()
+    // Left column: SYSTEM / MODELS / HEAT / STREAM.
+    // STREAM dominates the lower-left so the panel reads as
+    // "operational weight" against the lighter top utilities.
+    let left = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7), // PROXY
-            Constraint::Min(5),    // MODELS
-            Constraint::Length(4), // HEAT
+            Constraint::Percentage(18),
+            Constraint::Percentage(24),
+            Constraint::Percentage(14),
+            Constraint::Percentage(44),
         ])
-        .split(top[0]);
+        .split(cols[0]);
 
-    panels::proxy::render(f, left_stack[0], app);
-    panels::models::render(f, left_stack[1], app);
-    panels::heat::render(f, left_stack[2], app);
-    panels::brainrot::render(f, top[1], app);
-    panels::ledger::render(f, top[2], app);
+    panels::proxy::render(f, left[0], app);
+    panels::models::render(f, left[1], app);
+    panels::heat::render(f, left[2], app);
+    panels::stream::render(f, left[3], app);
 
-    let bottom = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(rows[1]);
+    // Center column: BRAINROT GRAPH / METRICS STRIP / DIAGNOSTICS.
+    // Diagnostics is the heaviest visual mass in the lower half — that
+    // negative-space dominance is what creates the terminal-noir feel.
+    let center = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(36),
+            Constraint::Percentage(18),
+            Constraint::Percentage(46),
+        ])
+        .split(cols[1]);
 
-    panels::stream::render(f, bottom[0], app);
-    panels::diagnosis::render(f, bottom[1], app);
+    panels::brainrot::render(f, center[0], app);
+    panels::metrics::render(f, center[1], app);
+    panels::diagnosis::render(f, center[2], app);
+
+    // Right column: LEDGER (full height — vertical, surveilling).
+    panels::ledger::render(f, cols[2], app);
 }

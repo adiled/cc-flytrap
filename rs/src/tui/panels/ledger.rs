@@ -1,4 +1,6 @@
-//! LEDGER — newest-first table.
+//! LEDGER — newest-first table. Header above, tight rows below. The
+//! brief: header 8% / rows 92%, no roomy spacing — claustrophobic
+//! density, surveilling.
 
 use crate::tui::style;
 use crate::tui::App;
@@ -22,9 +24,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let mut recs = app.agg.records.clone();
     recs.sort_by(|a, b| b.ts.partial_cmp(&a.ts).unwrap_or(std::cmp::Ordering::Equal));
 
+    // Tight: only header row reserved (1 row), all remaining rows are data.
+    // No bottom margin.
+    let max_rows = inner.height.saturating_sub(1) as usize;
+
     let rows: Vec<Row> = recs
         .iter()
-        .take(inner.height.saturating_sub(2) as usize)
+        .take(max_rows)
         .map(|r| {
             let dt = time::OffsetDateTime::from_unix_timestamp(r.ts as i64)
                 .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)

@@ -1,4 +1,6 @@
-//! STREAM — compact recent-flow tail.
+//! STREAM — compact recent-flow tail. Rows almost touch — no comfortable
+//! spacing. The panel reads as operational density: claustrophobic, dense,
+//! dominant in the lower-left of the dashboard.
 
 use crate::brainrot::aggregate::short_model;
 use crate::tui::style;
@@ -16,9 +18,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let mut recs = app.agg.records.clone();
     recs.sort_by(|a, b| b.ts.partial_cmp(&a.ts).unwrap_or(std::cmp::Ordering::Equal));
 
+    // Fill all available rows in the inner area — tight, no bottom margin.
+    let max_rows = inner.height as usize;
+
     let lines: Vec<Line> = recs
         .iter()
-        .take(inner.height.saturating_sub(1) as usize)
+        .take(max_rows)
         .map(|r| {
             let dt = time::OffsetDateTime::from_unix_timestamp(r.ts as i64)
                 .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
