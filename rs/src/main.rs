@@ -1,0 +1,186 @@
+//! ccft - an agentic self improvement tool.
+//!
+//! Single-binary streaming MITM proxy on top of hudsucker. Listens between
+//! Claude Code and api.anthropic.com, mutates the request system prompt
+//! per ~/.config/ccft/ccft.json, and writes a per-response token ledger
+//! while preserving the upstream stream byte-for-byte to the client.
+
+mod brainrot;
+mod config;
+mod handler;
+mod install;
+mod ledger;
+mod ledger_read;
+mod lifecycle;
+mod perf;
+mod proxy;
+mod session;
+mod sse_tap;
+mod theme;
+mod trust;
+mod tui;
+
+use clap::{Parser, Subcommand};
+use config::Config;
+
+#[derive(Parser)]
+#[command(name = "ccft", version, about = "ccft - an agentic self improvement tool")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Open the interactive TUI (default when invoked with no args at a tty).
+    Tui,
+    /// Run the proxy in the foreground with the production config.
+    /// (This is what launchd invokes after `ccft install`.)
+    Run,
+    /// Run the proxy in the foreground with the dev config (port 7179, isolated ledger).
+    Dev,
+    /// Install: copy this binary, generate CA, write launchd plist, bootstrap.
+    Install,
+    /// Uninstall: bootout, remove plist + installed binary. Keeps CA + ledger.
+    Uninstall,
+    /// Show whether ccft is installed, loaded, and bound.
+    Status,
+    /// Kick the launchd service.
+    Start,
+    /// Bootout from launchd.
+    Stop,
+    /// Bootout + bootstrap.
+    Restart,
+    /// Print env vars to route Claude through ccft, or apply/revoke to ~/.claude.json.
+    Trust {
+        /// Write HTTPS_PROXY + NODE_EXTRA_CA_CERTS into ~/.claude.json (with backup).
+        #[arg(long)]
+        apply: bool,
+        /// Remove proxy env keys from ~/.claude.json (with backup).
+        #[arg(long)]
+        revoke: bool,
+        /// Dump the CA cert PEM to stdout.
+        #[arg(long)]
+        ca: bool,
+    },
+    /// Tail the launchd output log.
+    Logs {
+        /// Number of lines from the end to start with.
+        #[arg(short, long, default_value_t = 50)]
+        n: usize,
+    },
+    /// Time-series vibe analyzer over the ledger (today, score, ...).
+    Brainrot {
+        /// Subcommand and args, e.g. `today`, `score 24h`.
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+    /// Perf observability: is ccft slowing requests down?
+    Perf {
+        /// Range, e.g. `today`, `7d`, `24h`. Default: today.
+        #[arg(trailing_var_arg = true)]
+        range: Vec<String>,
+    },
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
+    // Decide tracing destination based on subcommand. The TUI owns the
+    // alternate screen; any tracing writes to stdout will smash through the
+    // ratatui frame and corrupt the display. So:
+    //   - Tui   → swallow logs (we don't have a file logger plumbed yet).
+    //   - Run   → stdout (launchd captures it via plist).
+    //   - else  → stdout, info level.
+    let no_subcommand = cli.command.is_none();
+    let going_to_tui = matches!(cli.command, Some(Cmd::Tui))
+        || (no_subcommand && std::io::IsTerminal::is_terminal(&std::io::stdout()));
+    if !going_to_tui {
+        init_tracing();
+    }
+
+    let cmd = cli.command.unwrap_or_else(|| {
+        // No subcommand: open TUI when stdout is a tty (interactive use).
+        // When stdout is NOT a tty (CI, scripts, launchd before the plist
+        // gets updated), fall back to running the proxy. The plist passes
+        // "run" explicitly so launchd never relies on this branch.
+        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            Cmd::Tui
+        } else {
+            Cmd::Run
+        }
+    });
+
+    match cmd {
+        Cmd::Tui => tui::run(),
+        Cmd::Run => run_proxy(Config::load()),
+        Cmd::Dev => {
+            let mut cfg = Config::load_dev();
+            // Force isolated port + ledger if dev.json doesn't override them.
+            if cfg.port == Config::default().port {
+                cfg.port = 7179;
+            }
+            // Re-export CCFT_LEDGER for the ledger module to pick up.
+            std::env::set_var(
+                "CCFT_LEDGER",
+                config::paths::share_dir().join("dev").join("ledger.jsonl"),
+            );
+            run_proxy(cfg)
+        }
+        Cmd::Install => install::install(),
+        Cmd::Uninstall => install::uninstall(),
+        Cmd::Status => {
+            lifecycle::print_status(&Config::load());
+            Ok(())
+        }
+        Cmd::Start => lifecycle::start(&Config::load()),
+        Cmd::Stop => lifecycle::stop(&Config::load()),
+        Cmd::Restart => lifecycle::restart(&Config::load()),
+        Cmd::Trust { apply, revoke, ca } => {
+            if ca {
+                trust::print_ca()
+            } else if apply {
+                trust::apply()
+            } else if revoke {
+                trust::revoke()
+            } else {
+                trust::print_instructions();
+                Ok(())
+            }
+        }
+        Cmd::Logs { n } => tail_logs(n),
+        Cmd::Brainrot { args } => brainrot::run(&args),
+        Cmd::Perf { range } => perf::run(&range.join(" ")),
+    }
+}
+
+fn run_proxy(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(proxy::run(cfg))
+}
+
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,hudsucker=warn,hyper=warn".into()),
+        )
+        .init();
+}
+
+fn tail_logs(n: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let path = config::paths::launchd_log();
+    if !path.exists() {
+        return Err(format!("no log file at {}", path.display()).into());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let lines: Vec<&str> = raw.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    for line in &lines[start..] {
+        println!("{}", line);
+    }
+    Ok(())
+}

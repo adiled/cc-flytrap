@@ -1,0 +1,288 @@
+//! split — driver vs bot turn split. Classifies turns by inter-arrival gap:
+//! first turn or gap > 5s = driver-initiated, else bot continuation.
+//! Mirrors brainrot.py classify_turns + split_aggregate + cmd_split.
+
+use crate::ledger_read::{compute_coverage, iter_records, load_state_events, parse_range, Record};
+use crate::theme::*;
+use std::collections::HashMap;
+
+const BOT_LOOP_THRESHOLD: f64 = 5.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Driver,
+    Bot,
+}
+
+pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let spec = if args.is_empty() { "today".to_string() } else { args.join(" ") };
+    let range = parse_range(&spec).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let records: Vec<Record> = iter_records(Some(range.since), Some(range.until)).collect();
+    let cov = compute_coverage(&load_state_events(), range.since, range.until);
+
+    header("brainrot split", &range.label);
+
+    if cov.currently_off {
+        bullet(&red("⚠ ledger is OFF — no records being captured"));
+        println!();
+        return Ok(());
+    }
+    if records.is_empty() {
+        if !cov.off_intervals.is_empty() {
+            let off_s: f64 = cov.off_intervals.iter().map(|(a, b)| b - a).sum();
+            bullet(&dim(&format!(
+                "(no records — ledger was off for {} of {})",
+                fmt_dur(off_s),
+                fmt_dur(cov.total_s)
+            )));
+        } else {
+            bullet(&dim("(no records in range)"));
+        }
+        println!();
+        return Ok(());
+    }
+
+    let kinds = classify(&records);
+
+    let mut drv_n = 0u64;
+    let mut drv_tok = 0u64;
+    let mut drv_lats = Vec::new();
+    let mut drv_in_total = 0u64;
+    let mut bot_n = 0u64;
+    let mut bot_tok = 0u64;
+    let mut bot_lats = Vec::new();
+    let mut bot_out = 0u64;
+    let mut bot_cr = 0u64;
+    let mut bot_cc = 0u64;
+
+    // Driver gaps within session
+    let mut drv_gaps: Vec<f64> = Vec::new();
+    let mut by_sid: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, r) in records.iter().enumerate() {
+        let sid = r.sid.clone().unwrap_or_else(|| "_orphan".into());
+        by_sid.entry(sid).or_default().push(i);
+    }
+    for (_, mut idxs) in by_sid.clone() {
+        idxs.sort_by(|a, b| {
+            records[*a].ts.partial_cmp(&records[*b].ts).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut last_drv_ts: Option<f64> = None;
+        for i in &idxs {
+            if kinds[*i] == Kind::Driver {
+                if let Some(prev) = last_drv_ts {
+                    drv_gaps.push(records[*i].ts - prev);
+                }
+                last_drv_ts = Some(records[*i].ts);
+            }
+        }
+    }
+
+    // Bot loop length per driver turn
+    let mut loop_lens: Vec<u32> = Vec::new();
+    for (_, mut idxs) in by_sid {
+        idxs.sort_by(|a, b| {
+            records[*a].ts.partial_cmp(&records[*b].ts).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut cur: u32 = 0;
+        for i in &idxs {
+            if kinds[*i] == Kind::Driver {
+                if cur > 0 {
+                    loop_lens.push(cur);
+                }
+                cur = 1;
+            } else {
+                cur += 1;
+            }
+        }
+        if cur > 0 {
+            loop_lens.push(cur);
+        }
+    }
+    loop_lens.sort();
+
+    for (i, r) in records.iter().enumerate() {
+        let net_in = r.r#in.saturating_sub(r.cr).saturating_sub(r.cc);
+        match kinds[i] {
+            Kind::Driver => {
+                drv_n += 1;
+                drv_tok += net_in;
+                drv_lats.push(r.lat);
+                drv_in_total += r.r#in;
+            }
+            Kind::Bot => {
+                bot_n += 1;
+                bot_tok += net_in;
+                bot_lats.push(r.lat);
+                bot_out += r.out;
+                bot_cr += r.cr;
+                bot_cc += r.cc;
+            }
+        }
+    }
+    let _ = (drv_in_total,); // silence
+
+    let total = drv_n + bot_n;
+    let drv_pct = if total > 0 { drv_n as f64 / total as f64 * 100.0 } else { 0.0 };
+    let bot_pct = if total > 0 { bot_n as f64 / total as f64 * 100.0 } else { 0.0 };
+    let drv_avg_tok = if drv_n > 0 { drv_tok / drv_n } else { 0 };
+    let bot_avg_tok = if bot_n > 0 { bot_tok / bot_n } else { 0 };
+    let drv_avg_lat = if !drv_lats.is_empty() {
+        drv_lats.iter().sum::<u64>() / drv_lats.len() as u64
+    } else { 0 };
+    let bot_avg_lat = if !bot_lats.is_empty() {
+        bot_lats.iter().sum::<u64>() / bot_lats.len() as u64
+    } else { 0 };
+
+    println!();
+    println!(
+        "  {}   {:>4} turns  {}  drove   {:>9} tok  {}  {:>6} avg",
+        bold("driver"),
+        drv_n,
+        grey("·"),
+        fmt_with_commas(drv_tok),
+        grey("·"),
+        fmt_with_commas(drv_avg_tok)
+    );
+    if !drv_gaps.is_empty() {
+        let mut sorted = drv_gaps.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let med = sorted[sorted.len() / 2];
+        let p90_idx = (sorted.len() as f64 * 0.9) as usize;
+        let p90 = sorted.get(p90_idx).copied().unwrap_or(med);
+        println!(
+            "           {}",
+            dim(&format!(
+                "gaps p50 {}   p90 {}   latency {}ms avg",
+                fmt_dur(med),
+                fmt_dur(p90),
+                drv_avg_lat
+            ))
+        );
+    } else {
+        println!(
+            "           {}",
+            dim(&format!("single driver turn   latency {}ms", drv_avg_lat))
+        );
+    }
+
+    let cache_total = bot_cr + bot_cc;
+    let cache_str = if cache_total > 0 {
+        format!(
+            "  {}  cache reuse {}%",
+            grey("·"),
+            (bot_cr as f64 / cache_total as f64 * 100.0) as u64
+        )
+    } else {
+        String::new()
+    };
+    println!(
+        "  {}      {:>4} turns  {}  looped  {:>9} tok  {}  {:>6} avg{}",
+        bold("bot"),
+        bot_n,
+        grey("·"),
+        fmt_with_commas(bot_tok),
+        grey("·"),
+        fmt_with_commas(bot_avg_tok),
+        cache_str
+    );
+    if !loop_lens.is_empty() {
+        let p50 = loop_lens[loop_lens.len() / 2];
+        let p90 = loop_lens
+            .get((loop_lens.len() as f64 * 0.9) as usize)
+            .copied()
+            .unwrap_or(p50);
+        let mx = *loop_lens.last().unwrap();
+        println!(
+            "           {}",
+            dim(&format!(
+                "loop length p50={}  p90={}  max={}   output {} tok   latency {}ms avg",
+                p50,
+                p90,
+                mx,
+                fmt_with_commas(bot_out),
+                bot_avg_lat
+            ))
+        );
+    } else {
+        println!(
+            "           {}",
+            dim(&format!(
+                "output {} tok   latency {}ms avg",
+                fmt_with_commas(bot_out),
+                bot_avg_lat
+            ))
+        );
+    }
+
+    section("ratio");
+    let ratio_str = format!("{}/{}", drv_pct as u64, bot_pct as u64);
+    let summary = if drv_n == 0 {
+        dim("no driver turns observed").to_string()
+    } else if bot_n == 0 {
+        dim("pure prompting — no tool loops").to_string()
+    } else if drv_pct >= 60.0 {
+        dim("driver-heavy — lots of typing, agent doing little tool work").to_string()
+    } else if bot_pct >= 75.0 {
+        dim("bot-heavy — agent is grinding through tool loops").to_string()
+    } else {
+        dim("balanced — driver steers, agent acts").to_string()
+    };
+    println!("    {:>6}    {}", ratio_str, summary);
+
+    if drv_n > 0 {
+        let band = if drv_avg_tok > 8000 {
+            dim("heavy — long prompts or paste-heavy")
+        } else if drv_avg_tok < 200 {
+            dim("light — short directive prompts")
+        } else {
+            dim("normal range")
+        };
+        println!(
+            "    {}  {:>6}    {}",
+            bold("driver tok"),
+            fmt_with_commas(drv_avg_tok),
+            band
+        );
+    }
+    println!();
+    Ok(())
+}
+
+fn classify(records: &[Record]) -> Vec<Kind> {
+    let mut kinds = vec![Kind::Driver; records.len()];
+    let mut by_sid: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, r) in records.iter().enumerate() {
+        let sid = r.sid.clone().unwrap_or_else(|| "_orphan".into());
+        by_sid.entry(sid).or_default().push(i);
+    }
+    for (_sid, mut idxs) in by_sid {
+        idxs.sort_by(|a, b| {
+            records[*a].ts.partial_cmp(&records[*b].ts).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut prev_te: Option<f64> = None;
+        for i in &idxs {
+            let r = &records[*i];
+            let te = if r.te > 0.0 { r.te } else { r.ts };
+            kinds[*i] = match prev_te {
+                None => Kind::Driver,
+                Some(prev) if (r.ts - prev) > BOT_LOOP_THRESHOLD => Kind::Driver,
+                Some(_) => Kind::Bot,
+            };
+            prev_te = Some(te);
+        }
+    }
+    kinds
+}
+
+fn fmt_with_commas(n: u64) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
