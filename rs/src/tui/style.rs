@@ -155,13 +155,53 @@ pub fn heat_color(latency_ms: f64) -> Color {
 const LAMBDA_HUE: f32 = 220.0;
 
 // Luminance distribution weights.
-const BURST_RATE: f32 = 0.04; // ~4% of cells are bursts
+const BURST_RATE: f32 = 0.020; // per-cell start probability — ~1-2 events per panel
+const BURST_DOUBLE_RATE: f32 = 0.22; // 22% of bursts span 2 cells
+const BURST_TRIPLE_RATE: f32 = 0.08; // 8% of bursts span 3 cells (rest are single)
+const DEAD_RATE: f32 = 0.10; // ~10% of eligible cells are dead-zone cells
 const NOISE_AT_BURST: f32 = 0.30; // 30% of bursts noise-corrupt an adjacent cell
 const MID_LUM_MIN: f32 = 0.32;
 const MID_LUM_MAX: f32 = 0.55;
 const BURST_LUM_MIN: f32 = 0.85;
 const BURST_LUM_MAX: f32 = 1.00;
 const NOISE_LUM: f32 = 0.04;
+
+// Dead-tier intensity is itself weighted random: 70% land in the EXPECTED
+// moderate-dim band, 30% in the deeply-dim outlier band — same shape as
+// the burst tier (most are normal, a few are extreme).
+const DEAD_DEEP_RATE: f32 = 0.30;
+const DEAD_MODERATE_MIN: f32 = 0.10;
+const DEAD_MODERATE_MAX: f32 = 0.18;
+const DEAD_DEEP_MIN: f32 = 0.02;
+const DEAD_DEEP_MAX: f32 = 0.08;
+
+// Cells within this many positions of a corner cannot be DEAD. Corners
+// always read as the panel's luminance high — no dim spans next to them.
+const CORNER_DEAD_EXCLUSION: i32 = 2;
+
+// ─── Dead-zone stretches (flying duck) ───────────────────────────────────────
+//
+// A contiguous span of cells gets a dimming multiplier applied AFTER tier
+// assignment. What would have fallen still falls, just as residue: bursts
+// remain bursts in CHARACTER (their color is still brightened in-hue) but
+// their luminance attenuates. Mid cells drop into the substrate-quiet
+// range; per-cell DEAD bits inside a flying stretch get dimmer still.
+//
+// Both occurrence AND intensity follow weighted random: per-cell start
+// probability, weighted random length (70% short, 30% longer), weighted
+// random dim factor (70% moderate, 30% deep). Stretches never enter the
+// corner-protected band — flying duck doesn't fly over corners.
+const DEAD_ZONE_START_RATE: f32 = 0.018; // ~1-2 zones per panel of ~70 cells
+const DEAD_ZONE_DEEP_RATE: f32 = 0.30;
+const DEAD_ZONE_LENGTH_LONG_RATE: f32 = 0.30;
+const DEAD_ZONE_SHORT_MIN: usize = 3;
+const DEAD_ZONE_SHORT_MAX: usize = 6;
+const DEAD_ZONE_LONG_MIN: usize = 7;
+const DEAD_ZONE_LONG_MAX: usize = 12;
+const DEAD_ZONE_DIM_MOD_MIN: f32 = 0.35;
+const DEAD_ZONE_DIM_MOD_MAX: f32 = 0.55;
+const DEAD_ZONE_DIM_DEEP_MIN: f32 = 0.15;
+const DEAD_ZONE_DIM_DEEP_MAX: f32 = 0.25;
 
 // Polluted neon — never pure #ff00ff/#00ffff. Magenta is red-tinged, cyan is
 // blue-tinged. Slightly desaturated so they don't scream.
@@ -228,8 +268,8 @@ pub fn paint_signal(buf: &mut Buffer, cells: &[(u16, u16, char)], seed: &str) {
     }
     let t = time_offset();
     let hue = compute_hue_field(n, seed);
-    let (luminance, _is_burst) = compute_perimeter_luminance(cells, seed, t);
-    paint_cells_with_signal(buf, cells, &hue, &luminance, seed);
+    let (luminance, is_burst) = compute_perimeter_luminance(cells, seed, t);
+    paint_cells_with_signal(buf, cells, &hue, &luminance, &is_burst, seed);
 }
 
 /// Panel border = perimeter signal + a single subliminal substrate halo.
@@ -247,8 +287,8 @@ fn paint_panel_border(buf: &mut Buffer, area: Rect, seed: &str) {
     let hue = compute_hue_field(n, seed);
     let (luminance, is_burst) = compute_perimeter_luminance(&cells, seed, t);
 
-    paint_cells_with_signal(buf, &cells, &hue, &luminance, seed);
-    paint_outward_glow(buf, area, &cells, &hue, &is_burst, seed);
+    paint_cells_with_signal(buf, &cells, &hue, &luminance, &is_burst, seed);
+    paint_outward_glow(buf, area, &cells, &hue, &luminance, &is_burst, seed);
 }
 
 
@@ -286,18 +326,23 @@ fn compute_hue_field(n: usize, seed: &str) -> Vec<f32> {
 // Per-cell weighted random sampling with slow temporal drift. The ENTIRE
 // luminance variation of the border:
 //
-//   - BURST_RATE (~4%):     luminance ∈ [0.85, 1.0]   ← visibly overdriven
-//   - rest      (~96%):    luminance ∈ [0.32, 0.55]   ← perceptible mid
-//   - CORNERS:              always BURST              ← corners always pop
+//   - BURST_RATE (~4%):       luminance ∈ [0.85, 1.0]   ← visibly overdriven
+//   - DEAD_RATE  (~10%):      luminance in dead-tier    ← dead-zone cells
+//   - rest      (~86%):       luminance ∈ [0.32, 0.55]  ← perceptible mid
+//   - CORNERS + ±2 neighbors: always BURST / never DEAD  ← corners pop
 //
-// Then for each BURST cell, a second roll: NOISE_AT_BURST (~30%) of bursts
-// noise-corrupt one adjacent non-burst, non-corner cell to NOISE_LUM (~0.04
-// opacity). That's the "imperfect display" texture — a low-opacity dropout
-// near a bright moment.
+// DEAD intensity is itself weighted random:
+//   - 70% of dead cells:  moderate-dim ∈ [0.10, 0.18]   ← expected
+//   - 30% of dead cells:  deeply-dim ∈ [0.02, 0.08]     ← outlier
 //
-// Time drift modulates each cell's burst roll by ±0.04 with a per-cell
-// phase, so individual cells slowly drift in and out of overload over
-// ~16-second cycles. Geometry is never animated; bright CELLS breathe.
+// For each BURST cell, a noise pass: NOISE_AT_BURST (~30%) of bursts
+// noise-corrupt one adjacent non-burst, non-corner cell to NOISE_LUM
+// (~0.04 opacity). The "imperfect display" texture.
+//
+// Time drift modulates each cell's burst-roll AND dead-roll by ±0.04 with
+// a per-cell phase, so individual cells drift in and out of both states
+// over ~16s cycles. Geometry is never animated; bright AND dim cells
+// both breathe.
 
 fn compute_perimeter_luminance(
     cells: &[(u16, u16, char)],
@@ -308,24 +353,99 @@ fn compute_perimeter_luminance(
     let mut lum = vec![0.0_f32; n];
     let mut is_burst = vec![false; n];
 
-    // Pass 1 — per-cell weighted random.
+    // Pre-pass — build the corner-adjacency mask. Cells within
+    // ±CORNER_DEAD_EXCLUSION positions of any corner are protected from
+    // the DEAD tier so corner approaches always read bright.
+    let mut near_corner = vec![false; n];
+    for i in 0..n {
+        if matches!(cells[i].2, '╭' | '╮' | '╰' | '╯') {
+            for d in -CORNER_DEAD_EXCLUSION..=CORNER_DEAD_EXCLUSION {
+                let j = ((i as i32 + d).rem_euclid(n as i32)) as usize;
+                near_corner[j] = true;
+            }
+        }
+    }
+
+    // Pass 1 — per-cell weighted random over BURST / DEAD / MID.
+    //
+    // BURST is a STATEFUL event: when one starts at cell i, it consumes a
+    // weighted-random number of cells (1, 2, or 3) before releasing. Each
+    // cell of the stretch gets its own luminance roll within [BURST_LUM_MIN,
+    // BURST_LUM_MAX]. Corners are always single-cell bursts and interrupt
+    // any active stretch.
+    let mut active_burst: i32 = 0;
     for i in 0..n {
         let (x, y, gi) = cells[i];
-        let h = cell_hash(seed, x, y);
-        let static_roll = (h & 0xFFFF) as f32 / 0xFFFF as f32;
-        let phase = ((h >> 16) & 0xFFFF) as f32 / 0xFFFF as f32 * std::f32::consts::TAU;
-        let drift = (time_offset * 0.4 + phase).sin() * 0.04;
-        let roll = (static_roll + drift).clamp(0.0, 1.0);
-
         let is_corner = matches!(gi, '╭' | '╮' | '╰' | '╯');
-        if is_corner || roll < BURST_RATE {
-            let detail = ((h >> 32) & 0xFFFF) as f32 / 0xFFFF as f32;
+        let h = cell_hash(seed, x, y);
+        let detail = ((h >> 32) & 0xFFFF) as f32 / 0xFFFF as f32;
+
+        // Corners — always single-cell burst, end any active stretch.
+        if is_corner {
             lum[i] = BURST_LUM_MIN + detail * (BURST_LUM_MAX - BURST_LUM_MIN);
             is_burst[i] = true;
-        } else {
-            let detail = ((h >> 32) & 0xFFFF) as f32 / 0xFFFF as f32;
-            lum[i] = MID_LUM_MIN + detail * (MID_LUM_MAX - MID_LUM_MIN);
+            active_burst = 0;
+            continue;
         }
+
+        // Continue active burst stretch.
+        if active_burst > 0 {
+            lum[i] = BURST_LUM_MIN + detail * (BURST_LUM_MAX - BURST_LUM_MIN);
+            is_burst[i] = true;
+            active_burst -= 1;
+            continue;
+        }
+
+        // Roll for new burst start (with time-drift breathing).
+        let burst_static = (h & 0xFFFF) as f32 / 0xFFFF as f32;
+        let burst_phase = ((h >> 16) & 0xFFFF) as f32 / 0xFFFF as f32 * std::f32::consts::TAU;
+        let burst_drift = (time_offset * 0.4 + burst_phase).sin() * 0.04;
+        let burst_roll = (burst_static + burst_drift).clamp(0.0, 1.0);
+
+        if burst_roll < BURST_RATE {
+            // Length — weighted random. Most are single-cell; a few are
+            // double; a smaller fraction triple. Variability without
+            // becoming streaks.
+            let length_roll = ((h >> 48) & 0xFFFF) as f32 / 0xFFFF as f32;
+            let length: i32 = if length_roll < BURST_TRIPLE_RATE {
+                3
+            } else if length_roll < BURST_TRIPLE_RATE + BURST_DOUBLE_RATE {
+                2
+            } else {
+                1
+            };
+            lum[i] = BURST_LUM_MIN + detail * (BURST_LUM_MAX - BURST_LUM_MIN);
+            is_burst[i] = true;
+            active_burst = length - 1;
+            continue;
+        }
+
+        // Dead roll — independent hash, independent time-drift phase.
+        // Eligible only when the cell is NOT a corner-adjacency cell.
+        if !near_corner[i] {
+            let dh = cell_hash(seed, x.wrapping_add(31), y.wrapping_add(37));
+            let dead_static = (dh & 0xFFFF) as f32 / 0xFFFF as f32;
+            let dead_phase =
+                ((dh >> 16) & 0xFFFF) as f32 / 0xFFFF as f32 * std::f32::consts::TAU;
+            let dead_drift = (time_offset * 0.4 + dead_phase).sin() * 0.04;
+            let dead_roll = (dead_static + dead_drift).clamp(0.0, 1.0);
+
+            if dead_roll < DEAD_RATE {
+                // Intensity sub-roll: 70% moderate-dim, 30% deeply-dim.
+                let intensity_roll = ((dh >> 32) & 0xFFFF) as f32 / 0xFFFF as f32;
+                let intensity_detail = ((dh >> 48) & 0xFFFF) as f32 / 0xFFFF as f32;
+                lum[i] = if intensity_roll < DEAD_DEEP_RATE {
+                    DEAD_DEEP_MIN + intensity_detail * (DEAD_DEEP_MAX - DEAD_DEEP_MIN)
+                } else {
+                    DEAD_MODERATE_MIN
+                        + intensity_detail * (DEAD_MODERATE_MAX - DEAD_MODERATE_MIN)
+                };
+                continue;
+            }
+        }
+
+        // Default — MID tier.
+        lum[i] = MID_LUM_MIN + detail * (MID_LUM_MAX - MID_LUM_MIN);
     }
 
     // Pass 2 — burst-triggered noise corruption.
@@ -351,6 +471,65 @@ fn compute_perimeter_luminance(
         }
     }
 
+    // Pass 3 — dead-zone stretches (flying duck). Stateful walk through
+    // the perimeter: at each cell, if no zone is active, roll for "start
+    // a new zone." If active, apply the zone's dimming to luminance.
+    // Zones get cut short by corner-protected bands. is_burst is NOT
+    // touched — the dropping pattern stays; only the visibility falls.
+    let mut active_remaining: i32 = 0;
+    let mut active_dim: f32 = 1.0;
+    for i in 0..n {
+        if active_remaining > 0 {
+            if near_corner[i] {
+                active_remaining = 0; // zone interrupted by corner band
+            } else {
+                lum[i] *= active_dim;
+                active_remaining -= 1;
+            }
+            continue;
+        }
+        if near_corner[i] {
+            continue;
+        }
+        let (x, y, _) = cells[i];
+
+        // Start roll — independent hash, time-drifted so zones breathe.
+        let h = cell_hash(seed, x.wrapping_add(2017), y.wrapping_add(2027));
+        let static_roll = (h & 0xFFFF) as f32 / 0xFFFF as f32;
+        let phase = ((h >> 16) & 0xFFFF) as f32 / 0xFFFF as f32 * std::f32::consts::TAU;
+        let drift = (time_offset * 0.3 + phase).sin() * 0.012;
+        let start_roll = (static_roll + drift).clamp(0.0, 1.0);
+
+        if start_roll < DEAD_ZONE_START_RATE {
+            // Length — weighted random, 70% short / 30% long.
+            let length_roll = ((h >> 32) & 0xFFFF) as f32 / 0xFFFF as f32;
+            let length_detail = ((h >> 48) & 0xFFFF) as f32 / 0xFFFF as f32;
+            let (lmin, lmax) = if length_roll < DEAD_ZONE_LENGTH_LONG_RATE {
+                (DEAD_ZONE_LONG_MIN, DEAD_ZONE_LONG_MAX)
+            } else {
+                (DEAD_ZONE_SHORT_MIN, DEAD_ZONE_SHORT_MAX)
+            };
+            let length =
+                (lmin + (length_detail * (lmax - lmin + 1) as f32) as usize).min(lmax);
+
+            // Dim factor — weighted random, 70% moderate / 30% deep.
+            let dh = cell_hash(seed, x.wrapping_add(3019), y.wrapping_add(3023));
+            let dim_roll = (dh & 0xFFFF) as f32 / 0xFFFF as f32;
+            let dim_detail = ((dh >> 16) & 0xFFFF) as f32 / 0xFFFF as f32;
+            let dim_factor = if dim_roll < DEAD_ZONE_DEEP_RATE {
+                DEAD_ZONE_DIM_DEEP_MIN
+                    + dim_detail * (DEAD_ZONE_DIM_DEEP_MAX - DEAD_ZONE_DIM_DEEP_MIN)
+            } else {
+                DEAD_ZONE_DIM_MOD_MIN
+                    + dim_detail * (DEAD_ZONE_DIM_MOD_MAX - DEAD_ZONE_DIM_MOD_MIN)
+            };
+
+            lum[i] *= dim_factor;
+            active_remaining = length as i32 - 1;
+            active_dim = dim_factor;
+        }
+    }
+
     (lum, is_burst)
 }
 
@@ -359,16 +538,18 @@ fn compute_perimeter_luminance(
 //
 // Each cell renders its canonical glyph (`─ │ ╭ ╮ ╰ ╯`) at the luminance
 // produced by `compute_perimeter_luminance`. BURST cells get a hue-preserved
-// RGB brightening (channels scale up multiplicatively, clip at 255 — so
-// magenta becomes brighter magenta, cyan becomes brighter cyan, never
-// approaching white). MID and NOISE cells render the cell's natural hue
-// at their assigned opacity, no brightening.
+// RGB brightening (channels scale up multiplicatively, clip at 255). The
+// brightening keys off the is_burst FLAG, not a luminance threshold, so a
+// burst inside a flying-duck dead zone — whose luminance has been dimmed —
+// still gets the saturated burst COLOR. The dropping is still recognizable;
+// only its visibility is reduced ("residue of the dropping").
 
 fn paint_cells_with_signal(
     buf: &mut Buffer,
     cells: &[(u16, u16, char)],
     hue: &[f32],
     luminance: &[f32],
+    is_burst: &[bool],
     seed: &str,
 ) {
     let p_temp = phase_from(seed, "temp");
@@ -376,18 +557,27 @@ fn paint_cells_with_signal(
     for (i, &(x, y, default_glyph)) in cells.iter().enumerate() {
         let lum = luminance[i];
 
-        // Slight per-cell hue jitter from temp_shift — sub-perceptual color
-        // texture so the line doesn't read as flat-color zones.
         let p = i as f32;
         let temp_shift = (p * std::f32::consts::TAU / 80.0 + p_temp).sin() * 0.06;
         let h = (hue[i] + temp_shift).clamp(0.0, 1.0);
         let mut color = lerp_rgb(NEON_MAGENTA, NEON_CYAN, h);
 
-        // Hue-preserved brightening only at BURST tier. Channels clip at
-        // 255 individually so saturated magenta/cyan get more saturated;
-        // they never wash to white.
-        if lum >= BURST_LUM_MIN {
-            let factor = 1.0 + (lum - BURST_LUM_MIN) / (BURST_LUM_MAX - BURST_LUM_MIN) * 0.55;
+        // Brightening keys off the flag, not lum — so dimmed bursts (in
+        // flying-duck stretches) still carry the saturated burst color.
+        // The brightening factor scales with the cell's UNDIMMED burst
+        // intensity though; for a dimmed burst we approximate the original
+        // by dividing out the visible lum's relationship to BURST_LUM_MIN.
+        if is_burst[i] {
+            // Use a fixed mid-burst brighten factor for dimmed bursts, or
+            // the lum-scaled factor for full bursts. Branch on whether we
+            // can recover the original lum from the visible value.
+            let factor = if lum >= BURST_LUM_MIN {
+                1.0 + (lum - BURST_LUM_MIN) / (BURST_LUM_MAX - BURST_LUM_MIN) * 0.55
+            } else {
+                // Dimmed burst — apply the burst-tier mid brightening so
+                // the saturated color identity survives the dimming.
+                1.30
+            };
             color = brighten(color, factor);
         }
 
@@ -409,6 +599,7 @@ fn paint_outward_glow(
     area: Rect,
     cells: &[(u16, u16, char)],
     hue: &[f32],
+    luminance: &[f32],
     is_burst: &[bool],
     seed: &str,
 ) {
@@ -418,6 +609,11 @@ fn paint_outward_glow(
 
     for (i, &(x, y, glyph)) in cells.iter().enumerate() {
         if !is_burst[i] {
+            continue;
+        }
+        // Suppress halo for bursts that have been dimmed by a flying-duck
+        // dead zone. The duck is flying; only residue falls; no halo.
+        if luminance[i] < BURST_LUM_MIN * 0.80 {
             continue;
         }
 
