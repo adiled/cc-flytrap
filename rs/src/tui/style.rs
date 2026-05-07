@@ -151,8 +151,12 @@ pub fn heat_color(latency_ms: f64) -> Color {
 // border read as "renderer narrating its mechanism." This is a single
 // weighted distribution.
 
-// Hue field — one parameter only.
-const LAMBDA_HUE: f32 = 220.0;
+// Hue field — wavelength controls how often cyan↔magenta alternates along
+// the perimeter. Short wavelength (40) means most panels see 2-4 distinct
+// color zones rather than one big zone of each color. The yin-yang cycling
+// is the dominant visual rhythm, independent of luminance / bursts /
+// dead zones (those layers all multiply by the cell's natural hue color).
+const LAMBDA_HUE: f32 = 40.0;
 
 // Luminance distribution weights.
 const BURST_RATE: f32 = 0.020; // per-cell start probability — ~1-2 events per panel
@@ -295,11 +299,15 @@ fn paint_panel_border(buf: &mut Buffer, area: Rect, seed: &str) {
 // ─── Hue field ───────────────────────────────────────────────────────────────
 //
 // One slow-wavelength sine drift between polluted magenta (~0) and polluted
-// cyan (~1). Long wavelength gives long magenta zones and long cyan zones
-// with brief purple in the transitions. Cyclic EMA smooths the discrete
-// per-cell sampling. NO temporal drift on hue — color zones stay stable
-// across frames so the eye reads the panel's color identity instead of
-// chasing motion.
+// cyan (~1). Wavelength tuned so a typical panel perimeter passes through
+// 2-4 distinct color zones — frequent yin-yang cycling, not one-big-zone-
+// of-each-color. NO temporal drift on hue: zones stay stable across frames
+// so the eye reads the panel's color identity instead of chasing motion.
+//
+// Sharpening: tanh(h × 2.2) pushes the sine values toward the rails so
+// each zone reads clearly as cyan or magenta with brief purple only at
+// the crossings. Light cyclic smoothing follows so cycles don't atomize
+// into salt-and-pepper.
 
 fn compute_hue_field(n: usize, seed: &str) -> Vec<f32> {
     let p_hue = phase_from(seed, "hue");
@@ -307,13 +315,17 @@ fn compute_hue_field(n: usize, seed: &str) -> Vec<f32> {
     for i in 0..n {
         let p = i as f32;
         let h = (p * std::f32::consts::TAU / LAMBDA_HUE + p_hue).sin();
-        let sharpened = (h * 1.3).tanh();
+        let sharpened = (h * 2.2).tanh();
         hue.push((sharpened + 1.0) * 0.5);
     }
-    for _ in 0..2 {
+    // Light cyclic smoothing — enough to remove micro-jaggies without
+    // washing out the short-wavelength cycles. One pass at high alpha
+    // (cell weight 0.65, neighbor 0.35) instead of the previous heavy
+    // two-pass smoothing that flattened the alternation.
+    {
         let mut last = hue[n - 1];
         for i in 0..n {
-            let v = hue[i] * 0.30 + last * 0.70;
+            let v = hue[i] * 0.65 + last * 0.35;
             hue[i] = v;
             last = v;
         }
