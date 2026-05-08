@@ -74,6 +74,14 @@ pub fn iter_records(
                 Err(_) => continue,
             };
             let Some(r) = Record::from_value(&v) else { continue };
+            // Skip records with bogus timestamps. `Record::from_value`
+            // defaults missing/unparseable `ts` to 0.0 (unix epoch = 1970),
+            // which would poison `first_ts` for the all-time snap and make
+            // the chart x-axis start at 1970. Anything before 2010 is
+            // assumed bogus (the ledger format is recent).
+            if r.ts < 1_262_304_000.0 {
+                continue;
+            }
             if let Some(s) = since {
                 if r.ts < s { continue; }
             }
@@ -244,6 +252,25 @@ pub fn parse_range(spec: &str) -> Result<Range, String> {
     }
     if s == "week" || s == "7d" {
         return Ok(Range { since: now - 7.0 * 86400.0, until: now, label: "last 7d".into() });
+    }
+    if s == "this-week" {
+        // This calendar week: Monday 00:00 local → Sunday 23:59:59 local.
+        // `until` extends to Sunday end even if today is mid-week — the
+        // chart shows the full week with future days as empty data.
+        let local_offset = time::UtcOffset::current_local_offset()
+            .unwrap_or(time::UtcOffset::UTC);
+        let now_dt = time::OffsetDateTime::from_unix_timestamp(now as i64)
+            .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+            .to_offset(local_offset);
+        let days_since_monday = (now_dt.weekday().number_from_monday() - 1) as i64;
+        // Subtract days to get this Monday at the same time-of-day,
+        // then floor to midnight.
+        let monday_dt = now_dt - time::Duration::days(days_since_monday);
+        let monday_midnight = monday_dt.replace_time(time::Time::MIDNIGHT);
+        let since = monday_midnight.unix_timestamp() as f64;
+        // Sunday end = Monday + 7 days - 1 sec.
+        let until = since + 7.0 * 86400.0 - 1.0;
+        return Ok(Range { since, until, label: "this week".into() });
     }
     if s == "24h" {
         return Ok(Range { since: now - 86400.0, until: now, label: "last 24h".into() });

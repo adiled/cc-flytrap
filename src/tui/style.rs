@@ -872,6 +872,12 @@ fn scale_color(c: Color, factor: f32) -> Color {
     )
 }
 
+/// Public version of `scale_color` — multiply each channel by `opacity`
+/// (0.0..1.0) to simulate translucent text. Hue preserved, channels clamped.
+pub fn at_opacity(c: Color, opacity: f32) -> Color {
+    scale_color(c, opacity.clamp(0.0, 1.0))
+}
+
 /// Build a per-panel seed string from the panel's position. Two panels at
 /// different positions → different noise patterns; the same panel at the
 /// same position → same noise across redraws.

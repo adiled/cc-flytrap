@@ -39,6 +39,7 @@ pub(crate) enum RangePreset {
     Yesterday,
     H24,
     Week,
+    ThisWeek,
     All,
 }
 
@@ -49,7 +50,8 @@ impl RangePreset {
             Today => Yesterday,
             Yesterday => H24,
             H24 => Week,
-            Week => All,
+            Week => ThisWeek,
+            ThisWeek => All,
             All => Today,
         }
     }
@@ -60,7 +62,8 @@ impl RangePreset {
             Yesterday => Today,
             H24 => Yesterday,
             Week => H24,
-            All => Week,
+            ThisWeek => Week,
+            All => ThisWeek,
         }
     }
     fn spec(self) -> &'static str {
@@ -69,6 +72,7 @@ impl RangePreset {
             RangePreset::Yesterday => "yesterday",
             RangePreset::H24 => "24h",
             RangePreset::Week => "7d",
+            RangePreset::ThisWeek => "this-week",
             RangePreset::All => "all",
         }
     }
@@ -113,10 +117,14 @@ impl App {
         self.agg = Aggregate::ingest(iter_records(Some(self.range.since), Some(self.range.until)));
 
         // For "all", snap the range start to the first actual record timestamp
-        // so the x-axis doesn't span 1970-to-now uselessly.
+        // so the x-axis doesn't span 1970-to-now uselessly. If there are no
+        // records yet (brand-new install), fall back to "last 24h" so the
+        // chart shows a reasonable empty range instead of a 55-year span.
         if self.range_preset == RangePreset::All {
             if let Some(first) = self.agg.first_ts {
                 self.range.since = first;
+            } else {
+                self.range.since = self.range.until - 86400.0;
             }
         }
 
@@ -156,6 +164,10 @@ impl App {
             }
             KeyCode::Char('w') => {
                 self.range_preset = RangePreset::Week;
+                self.refresh();
+            }
+            KeyCode::Char('W') => {
+                self.range_preset = RangePreset::ThisWeek;
                 self.refresh();
             }
             KeyCode::Char('a') => {
@@ -278,11 +290,17 @@ fn body(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
     // composition reads as broadcast/surveillance rather than enterprise
     // grid. Perfect centering kills the cinematic feel.
     //
+    // Uniform 1-cell gutter on both axes. Terminal cells are ~2x taller
+    // than wide so a vertical 1-row gap reads visually larger than a
+    // horizontal 1-column gap, but logically they're both "1 cell of
+    // gutter" between adjacent widgets.
+    //
     //   left rail (14%)   = SYSTEM / MODELS / HEAT / STREAM   "machine room"
     //   center    (64%)   = BRAINROT / METRICS / DIAGNOSTICS  cinematic
     //   right     (22%)   = LEDGER (full height)              "surveilling"
     let cols = Layout::default()
         .direction(Direction::Horizontal)
+        .spacing(1)
         .constraints([
             Constraint::Percentage(14),
             Constraint::Percentage(64),
@@ -290,29 +308,28 @@ fn body(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
         ])
         .split(area);
 
-    // Left column: SYSTEM / MODELS / HEAT / STREAM.
-    // STREAM dominates the lower-left so the panel reads as
-    // "operational weight" against the lighter top utilities.
+    // Left column: SYSTEM / MODELS / HEAT.
+    // HEAT absorbs the freed STREAM space (was 44%) so the heat-by-time
+    // bar chart has room to breathe and the panel reads as "machine room
+    // density" by itself.
     let left = Layout::default()
         .direction(Direction::Vertical)
+        .spacing(1)
         .constraints([
             Constraint::Percentage(18),
             Constraint::Percentage(24),
-            Constraint::Percentage(14),
-            Constraint::Percentage(44),
+            Constraint::Percentage(58),
         ])
         .split(cols[0]);
 
     panels::proxy::render(f, left[0], app);
     panels::models::render(f, left[1], app);
     panels::heat::render(f, left[2], app);
-    panels::stream::render(f, left[3], app);
 
     // Center column: BRAINROT GRAPH / METRICS STRIP / DIAGNOSTICS.
-    // Diagnostics is the heaviest visual mass in the lower half — that
-    // negative-space dominance is what creates the terminal-noir feel.
     let center = Layout::default()
         .direction(Direction::Vertical)
+        .spacing(1)
         .constraints([
             Constraint::Percentage(36),
             Constraint::Percentage(18),

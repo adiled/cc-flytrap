@@ -64,7 +64,9 @@ pub fn keybar(f: &mut Frame, area: Rect, _app: &App) {
     left.push(Span::raw(" "));
     push_vim(&mut left, ":y yday", 1);
     left.push(Span::raw(" "));
-    push_vim(&mut left, ":w week", 1);
+    push_vim(&mut left, ":w 7d", 1);
+    left.push(Span::raw(" "));
+    push_vim(&mut left, ":W wk", 1);
     left.push(Span::raw(" "));
     push_vim(&mut left, ":a all", 1);
     left.push(gap());

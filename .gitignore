@@ -1,9 +1,16 @@
+# Rust build artifacts
+/target
+
+# Runtime logs / pids
 logs/
 *.log
-debug_system.json
-.DS_Store
-release.sh
 .ccft.pid
-cc-flytrap/docs/
+debug_system.json
+
+# OS
+.DS_Store
+
+# Local-only files (intentionally untracked)
 AGENTS.md
+release.sh
 dev.sh

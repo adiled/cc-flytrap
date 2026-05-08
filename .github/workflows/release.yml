@@ -9,20 +9,36 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create release package
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Stage release artifact
         run: |
-          tar -czvf cc-flytrap.tar.gz cc-flytrap cc-flytrap.py brainrot.py perf.py ledger.py NOTICE README.md LICENSE install.sh bin/
-          
+          mkdir -p dist
+          cp target/release/ccft dist/ccft
+          cp LICENSE NOTICE README.md dist/
+          tar -czvf ccft.tar.gz -C dist .
+
       - name: Create GitHub Release
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           gh release create "$TAG" \
             --title "$TAG" \
             --generate-notes \
-            cc-flytrap.tar.gz
+            ccft.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

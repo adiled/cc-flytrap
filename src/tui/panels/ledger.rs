@@ -36,7 +36,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
                 .to_offset(local);
             let when = format!("{:02}:{:02}:{:02}", dt.hour(), dt.minute(), dt.second());
-            let lat_style = Style::default().fg(style::heat_color(r.lat as f64));
+            // Lat at 50% opacity — heat-colored but visually receded so
+            // the time + token columns dominate.
+            let lat_style =
+                Style::default().fg(style::at_opacity(style::heat_color(r.lat as f64), 0.5));
             Row::new(vec![
                 Cell::from(Span::styled(when, style::label())),
                 Cell::from(Span::styled(format!("+{}", short_n(r.r#in)), style::value())),
