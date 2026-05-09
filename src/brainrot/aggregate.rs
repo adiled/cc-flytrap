@@ -477,8 +477,8 @@ fn group_records_by_sid_basic(records: &[Record]) -> HashMap<String, Vec<usize>>
 // driver score returns a neutral 50 with an "insufficient data" signal —
 // it doesn't pretend to know.
 
-const MIN_UCH_RECORDS_WINDOW: u64 = 5;
-const MIN_UCH_RECORDS_BASELINE: u64 = 50;
+const MIN_UCH_RECORDS_WINDOW: u64 = 3;
+const MIN_UCH_RECORDS_BASELINE: u64 = 10;
 
 /// Whether the driver-score baseline has accumulated enough new-schema
 /// records to score against. Callers use this to render the driver tile

@@ -191,15 +191,13 @@ fn chart(f: &mut Frame, area: Rect, app: &App) {
 
     let y_axis = Axis::default()
         .bounds([0.0, 100.0])
-        // 3 labels (2 intervals) — ratatui rounds label positions to whole
-        // rows. With 5 labels (4 intervals) the gaps come out 3-3-4-3 unless
-        // chart_h is exactly divisible by 4. Two intervals only need
-        // chart_h % 2 == 0 which is far more often satisfied, and even when
-        // off by 1, the visual asymmetry is half a row instead of a whole.
+        // Two labels keeps the gutter to 2 cols (widest = "50") instead of
+        // 3 ("100"). Top of chart implicitly = 100; user knows bounds are
+        // 0..100 from context. Two intervals across the chart height also
+        // means ratatui's per-row rounding stays uniform on any height.
         .labels(vec![
-            Span::styled("  0", style::dim()),
-            Span::styled(" 50", style::dim()),
-            Span::styled("100", style::dim()),
+            Span::styled(" 0", style::dim()),
+            Span::styled("50", style::dim()),
         ])
         .style(Style::default().fg(style::GREY));
 
@@ -207,7 +205,8 @@ fn chart(f: &mut Frame, area: Rect, app: &App) {
         Chart::new(datasets)
             .style(Style::default().bg(style::BG))
             .x_axis(x_axis)
-            .y_axis(y_axis),
+            .y_axis(y_axis)
+            .legend_position(None),
         area,
     );
 }
@@ -235,9 +234,9 @@ fn paint_x_labels(f: &mut Frame, chart_area: Rect, label_row: Rect, app: &App) {
     };
 
     // Plot area: ratatui Chart reserves cols on the left for y-axis labels
-    // (max width = "100" = 3 chars) plus 1 col for the axis line itself.
-    // The plot area starts at chart_area.x + 4 and extends to the right edge.
-    const Y_AXIS_PAD: u16 = 4;
+    // (max width = "50" = 2 chars) plus 1 col for the axis line itself.
+    // The plot area starts at chart_area.x + 3 and extends to the right edge.
+    const Y_AXIS_PAD: u16 = 3;
     let plot_left = chart_area.x + Y_AXIS_PAD;
     let plot_right = chart_area.x + chart_area.width.saturating_sub(1);
     if plot_right <= plot_left {
