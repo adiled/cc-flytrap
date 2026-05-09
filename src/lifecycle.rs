@@ -1,21 +1,21 @@
-//! Lifecycle: start / stop / status / restart.
+//! Lifecycle: start / stop / restart / status.
 //!
-//! Goes through launchd if the service is registered (production); otherwise
-//! reports "not installed". Mirrors the well-factored ccft-lib oracle pattern
-//! from the bash version: a single `state()` function is the source of truth.
+//! Goes through the platform's service manager (launchd on macOS, systemd-user
+//! on Linux). One `state()` function is the source of truth for the printed
+//! status; start/stop/restart are thin wrappers around the service module.
 
 use crate::config::{paths, Config};
-use crate::install;
+use crate::service;
 use std::net::TcpStream;
 use std::process::Command;
 use std::time::Duration;
 
 #[derive(Debug)]
 pub enum State {
-    /// launchd-managed and bound to the configured port.
-    LaunchdRunning { pid: u32 },
-    /// launchd registered but not currently running.
-    LaunchdIdle,
+    /// Service-managed and bound to the configured port.
+    Running { pid: u32 },
+    /// Service registered but not currently running.
+    Idle,
     /// Something else is bound to our port (foreign proxy or stale process).
     PortBoundForeign,
     /// Not installed at all.
@@ -23,20 +23,19 @@ pub enum State {
 }
 
 pub fn state(cfg: &Config) -> State {
-    let installed = install::is_loaded();
+    let registered = service::is_registered();
 
-    if !installed && !paths::plist().exists() && !paths::install_bin().exists() {
+    if !registered && !service::unit_path().exists() && !paths::install_bin().exists() {
         return State::NotInstalled;
     }
 
     let bound_pid = port_bound(&cfg.host, cfg.port);
 
-    if installed {
+    if registered {
         if let Some(pid) = bound_pid {
-            // Verify it's our service's pid via launchctl print.
-            return State::LaunchdRunning { pid };
+            return State::Running { pid };
         }
-        return State::LaunchdIdle;
+        return State::Idle;
     }
 
     if bound_pid.is_some() {
@@ -47,22 +46,29 @@ pub fn state(cfg: &Config) -> State {
 
 pub fn print_status(cfg: &Config) {
     match state(cfg) {
-        State::LaunchdRunning { pid } => {
+        State::Running { pid } => {
             println!(
-                "ccft running on {}:{} (pid {}, launchd)",
-                cfg.host, cfg.port, pid
+                "ccft running on {}:{} (pid {}, {})",
+                cfg.host,
+                cfg.port,
+                pid,
+                service::manager_name()
             );
         }
-        State::LaunchdIdle => {
+        State::Idle => {
             println!(
-                "ccft installed (launchd) but not bound to {}:{} — kick with `ccft start`",
-                cfg.host, cfg.port
+                "ccft installed ({}) but not bound to {}:{} — kick with `ccft start`",
+                service::manager_name(),
+                cfg.host,
+                cfg.port
             );
         }
         State::PortBoundForeign => {
             println!(
-                "ccft NOT installed via launchd, but {}:{} is in use by another process",
-                cfg.host, cfg.port
+                "ccft NOT installed via {}, but {}:{} is in use by another process",
+                service::manager_name(),
+                cfg.host,
+                cfg.port
             );
         }
         State::NotInstalled => {
@@ -72,15 +78,14 @@ pub fn print_status(cfg: &Config) {
 }
 
 pub fn start(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    if !install::is_loaded() {
+    if !service::is_registered() {
         return Err("ccft is not installed. Run: ccft install".into());
     }
     if paths::is_isolated() {
         return Err("isolated mode — start/stop are no-ops; use `ccft run` directly".into());
     }
-    install::kickstart()?;
-    println!("✓ kicked launchd service");
-    // Give it a moment to bind.
+    service::kickstart()?;
+    println!("✓ kicked {} service", service::manager_name());
     for _ in 0..20 {
         if port_bound(&cfg.host, cfg.port).is_some() {
             println!("✓ bound on {}:{}", cfg.host, cfg.port);
@@ -96,27 +101,29 @@ pub fn start(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn stop(_cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    if !install::is_loaded() {
+    if !service::is_registered() {
         println!("ccft not installed — nothing to stop");
         return Ok(());
     }
     if paths::is_isolated() {
-        println!("isolated mode — nothing to stop in launchd");
+        println!("isolated mode — nothing to stop");
         return Ok(());
     }
-    install::bootout()?;
-    println!("✓ unloaded (will restart on next login unless you `ccft uninstall`)");
+    service::bootout()?;
+    println!(
+        "✓ stopped (will restart on next login unless you `ccft uninstall`)"
+    );
     Ok(())
 }
 
 pub fn restart(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    if !install::is_loaded() {
+    if !service::is_registered() {
         return Err("ccft is not installed. Run: ccft install".into());
     }
     if paths::is_isolated() {
         return Err("isolated mode — restart is a no-op; use `ccft run` directly".into());
     }
-    install::kickstart()?;
+    service::kickstart()?;
     for _ in 0..20 {
         if port_bound(&cfg.host, cfg.port).is_some() {
             println!("✓ restarted, bound on {}:{}", cfg.host, cfg.port);
@@ -140,6 +147,5 @@ fn port_bound(host: &str, port: u16) -> Option<u32> {
         .output()
         .ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
-    // Terse output: one PID per line, just digits.
     s.lines().next().and_then(|l| l.trim().parse().ok())
 }

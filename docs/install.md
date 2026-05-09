@@ -1,9 +1,14 @@
 # Install
 
-## Prereqs
+## Supported platforms
 
-- macOS (launchd-managed daemon)
-- For source build: `rustc` ≥ 1.95 (`brew install rust`)
+| OS | Service auto-start | Lifecycle |
+|---|---|---|
+| **macOS** | `launchd` user agent | full (`ccft start/stop/restart/status/logs`) |
+| **Linux** | `systemd-user` unit | full (`ccft start/stop/restart/status/logs` via `systemctl --user` + `journalctl`) |
+| **Windows** | not implemented yet | manual (`ccft run` in a terminal, or wrap with NSSM/sc.exe) |
+
+For source build: `rustc` ≥ 1.95 (`brew install rust` on mac, distro package on linux).
 
 ## Quick install (from source)
 
@@ -17,8 +22,10 @@ ccft trust --apply   # write env into ~/.claude.json (with backup)
 1. Generates a self-signed CA at `~/.cc-flytrap/{ca.pem,ca.key}` (if missing).
 2. Writes a default config at `~/.config/ccft/ccft.json` (if missing).
 3. Copies the running binary to `~/.local/bin/ccft`.
-4. Writes `~/Library/LaunchAgents/com.ccft.plist` pointing at the installed binary, with `RunAtLoad` and `KeepAlive`.
-5. `launchctl bootstrap`s the plist into the user domain.
+4. Writes the platform's service unit pointing at the installed binary:
+   - macOS: `~/Library/LaunchAgents/com.ccft.plist` (RunAtLoad, KeepAlive)
+   - Linux: `~/.config/systemd/user/com.ccft.service` (Restart=always)
+5. Registers it with the platform's user-mode service manager (`launchctl bootstrap` / `systemctl --user enable --now`).
 
 After install, the flytrap is running on `127.0.0.1:7178`. To route Claude through it:
 

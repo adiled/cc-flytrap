@@ -182,14 +182,4 @@ pub mod paths {
     pub fn install_bin() -> PathBuf {
         install_bin_dir().join("ccft")
     }
-
-    pub fn launch_agents_dir() -> PathBuf {
-        // Real launchd only watches $HOME/Library/LaunchAgents, but in isolated
-        // mode we still write a plist into $CCFT_PREFIX/Library/LaunchAgents so
-        // the file-op surface is exercised end-to-end.
-        root().join("Library").join("LaunchAgents")
-    }
-    pub fn plist() -> PathBuf {
-        launch_agents_dir().join("com.ccft.plist")
-    }
 }

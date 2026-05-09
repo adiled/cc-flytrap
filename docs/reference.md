@@ -49,14 +49,16 @@ The TUI brainrot panel reads this file as-is.
 | Path | Owner | What |
 |---|---|---|
 | `~/.local/bin/ccft` | `ccft install` | The binary itself |
-| `~/Library/LaunchAgents/com.ccft.plist` | `ccft install` | launchd unit |
+| `~/Library/LaunchAgents/com.ccft.plist` | `ccft install` (macOS) | launchd unit |
+| `~/.config/systemd/user/com.ccft.service` | `ccft install` (Linux) | systemd-user unit |
 | `~/.cc-flytrap/ca.pem`, `ca.key` | `ccft install` (or first run) | Self-signed CA |
 | `~/.config/ccft/ccft.json` | user / `ccft install` (default) | Production config |
 | `~/.config/ccft/dev.json` | user (optional) | Dev config |
 | `~/.local/share/ccft/ledger.jsonl` | runtime | Production ledger |
 | `~/.local/share/ccft/state.jsonl` | runtime | `ledger_on`/`ledger_off` events |
 | `~/.local/share/ccft/dev/ledger.jsonl` | `ccft dev` | Dev ledger |
-| `~/.local/share/ccft/logs/launchd.log` | launchd | stdout+stderr from the service |
+| `~/.local/share/ccft/logs/launchd.log` | macOS launchd | stdout+stderr from the service |
+| `journalctl --user -u com.ccft` | Linux systemd | stdout+stderr from the service |
 
 ## Subcommand reference
 

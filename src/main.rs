@@ -14,6 +14,7 @@ mod ledger_read;
 mod lifecycle;
 mod perf;
 mod flytrap;
+mod service;
 mod session;
 mod sse_tap;
 mod theme;
@@ -172,15 +173,45 @@ fn init_tracing() {
 }
 
 fn tail_logs(n: usize) -> Result<(), Box<dyn std::error::Error>> {
-    let path = config::paths::launchd_log();
-    if !path.exists() {
-        return Err(format!("no log file at {}", path.display()).into());
+    // macOS launchd writes stdout/stderr to a file; tail it.
+    #[cfg(target_os = "macos")]
+    {
+        let path = config::paths::launchd_log();
+        if !path.exists() {
+            return Err(format!("no log file at {}", path.display()).into());
+        }
+        let raw = std::fs::read_to_string(&path)?;
+        let lines: Vec<&str> = raw.lines().collect();
+        let start = lines.len().saturating_sub(n);
+        for line in &lines[start..] {
+            println!("{}", line);
+        }
+        return Ok(());
     }
-    let raw = std::fs::read_to_string(&path)?;
-    let lines: Vec<&str> = raw.lines().collect();
-    let start = lines.len().saturating_sub(n);
-    for line in &lines[start..] {
-        println!("{}", line);
+
+    // Linux systemd-user captures to journald. Shell out.
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        let status = Command::new("journalctl")
+            .args([
+                "--user",
+                "-u",
+                service::LABEL,
+                "-n",
+                &n.to_string(),
+                "--no-pager",
+            ])
+            .status()?;
+        if !status.success() {
+            return Err(format!("journalctl failed: {}", status).into());
+        }
+        return Ok(());
     }
-    Ok(())
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = n;
+        Err("ccft logs not implemented on this platform yet".into())
+    }
 }

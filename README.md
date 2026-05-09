@@ -10,14 +10,19 @@ Three design properties:
 2. **Streaming is preserved.** A custom `Body` wrapper taps the upstream SSE chunk-by-chunk. Tokens reach the client at the same cadence as direct.
 3. **Tiny resident footprint.** ~6 MB on disk, ~4 MB resident at idle.
 
-> macOS only — the daemon is `launchd`-managed.
+> Service auto-start runs on **macOS** (launchd) and **Linux** (systemd-user). On Windows, `ccft install` sets up the binary + CA + config; auto-start isn't wired yet — run `ccft run` manually.
 
 ## Install
 
-Prebuilt universal binary from the latest release:
+Prebuilt binary from the latest release:
 
 ```bash
-curl -L https://github.com/adiled/ccft/releases/latest/download/ccft -o /usr/local/bin/ccft
+# macOS (universal aarch64 + x86_64)
+curl -L https://github.com/adiled/ccft/releases/latest/download/ccft-macos-universal -o /usr/local/bin/ccft
+
+# Linux (x86_64)
+curl -L https://github.com/adiled/ccft/releases/latest/download/ccft-linux-x86_64 -o /usr/local/bin/ccft
+
 chmod +x /usr/local/bin/ccft
 ccft install
 ccft trust --apply
