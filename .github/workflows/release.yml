@@ -13,25 +13,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache cargo registry + target
+      - name: Add Rust targets
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Cache cargo registry + targets
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-${{ runner.os }}-universal-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-universal-
 
-      - name: Build release binary
-        run: cargo build --release
+      - name: Build aarch64
+        run: cargo build --release --target aarch64-apple-darwin
 
-      - name: Stage release artifact
+      - name: Build x86_64
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Lipo into universal binary
         run: |
           mkdir -p dist
-          cp target/release/ccft dist/ccft
+          lipo -create -output dist/ccft \
+            target/aarch64-apple-darwin/release/ccft \
+            target/x86_64-apple-darwin/release/ccft
+          chmod +x dist/ccft
+          file dist/ccft
           cp LICENSE NOTICE README.md dist/
-          tar -czvf ccft.tar.gz -C dist .
+
+      - name: Tarball
+        run: tar -czvf ccft-macos-universal.tar.gz -C dist .
 
       - name: Create GitHub Release
         run: |
@@ -39,6 +52,7 @@ jobs:
           gh release create "$TAG" \
             --title "$TAG" \
             --generate-notes \
-            ccft.tar.gz
+            dist/ccft \
+            ccft-macos-universal.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
