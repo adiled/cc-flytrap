@@ -97,10 +97,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "no driver turns observed"
         } else if s.bot_n == 0 {
             "pure prompting — no tool loops"
-        } else if s.drv_pct >= 60.0 {
-            "driver-heavy — lots of typing, agent doing little tool work"
-        } else if s.bot_pct >= 75.0 {
+        } else if s.bot_pct >= 80.0 {
             "bot-heavy — agent grinding through tool loops"
+        } else if s.bot_pct >= 60.0 {
+            "bot-leaning — agent doing more tool work than you're typing"
+        } else if s.drv_pct >= 80.0 {
+            "driver-heavy — lots of typing, agent doing little tool work"
+        } else if s.drv_pct >= 60.0 {
+            "driver-leaning — typing more than the agent is iterating"
         } else {
             "balanced — driver steers, agent acts"
         };
