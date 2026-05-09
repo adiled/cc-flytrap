@@ -57,6 +57,7 @@ fn empty_view(cov: &Coverage) {
 fn scores_view(a: &Aggregate, baseline: &Baseline, cov: &Coverage) {
     let bot = bot_score(a, baseline);
     let drv = driver_score(a, baseline);
+    let drv_bootstrap = driver_is_bootstrapping(baseline);
     section("vibe");
     println!(
         "    {}     {} / 100   {} {}",
@@ -65,15 +66,27 @@ fn scores_view(a: &Aggregate, baseline: &Baseline, cov: &Coverage) {
         grey("—"),
         vibe_label(bot)
     );
-    println!(
-        "    {}  {} / 100   {} {}",
-        bold("driver"),
-        score_color(drv, &format!("{:>3}", drv)),
-        grey("—"),
-        vibe_label(drv)
-    );
-    if let Some(diag) = diagnosis(bot, drv) {
-        println!("        {} {}", grey("↳"), subtle(diag));
+    if drv_bootstrap {
+        println!(
+            "    {}  {} / 100   {} {}",
+            bold("driver"),
+            grey("  —"),
+            grey("—"),
+            grey("bootstrapping (need 50+ records with u_ch)")
+        );
+    } else {
+        println!(
+            "    {}  {} / 100   {} {}",
+            bold("driver"),
+            score_color(drv, &format!("{:>3}", drv)),
+            grey("—"),
+            vibe_label(drv)
+        );
+    }
+    if !drv_bootstrap {
+        if let Some(diag) = diagnosis(bot, drv) {
+            println!("        {} {}", grey("↳"), subtle(diag));
+        }
     }
     if let Some(line) = render_coverage_line(cov) {
         println!("        {} {}", grey("↳"), line);

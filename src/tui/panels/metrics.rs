@@ -13,7 +13,9 @@
 //! shared `style::panel` renderer, so per-tile borders pick up the same
 //! energized rail treatment as the larger panels.
 
-use crate::brainrot::aggregate::{bot_score, driver_score, vibe_label, Aggregate, Baseline};
+use crate::brainrot::aggregate::{
+    bot_score, driver_is_bootstrapping, driver_score, vibe_label, Aggregate, Baseline,
+};
 use crate::ledger_read::{percentile, Record};
 use crate::tui::style;
 use crate::tui::App;
@@ -39,6 +41,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     // Whole-range aggregates (the BIG number per tile).
     let bot = bot_score(&app.agg, &app.baseline);
     let drv = driver_score(&app.agg, &app.baseline);
+    let driver_bootstrapping = driver_is_bootstrapping(&app.baseline);
+    let (drv_value, drv_sub) = if driver_bootstrapping {
+        ("—".to_string(), "no u_ch yet".to_string())
+    } else {
+        (drv.to_string(), vibe_label(drv).to_string())
+    };
     let mut lats = app.agg.lats.clone();
     let p50 = percentile(&mut lats.clone(), 50.0) as u64;
     let lat_word = lat_tier_word(p50 as f64, &app.baseline);
@@ -74,9 +82,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         f,
         cells[1],
         "DRIVER",
-        &drv.to_string(),
-        &vibe_label(drv).to_string(),
-        &series.driver,
+        &drv_value,
+        &drv_sub,
+        if driver_bootstrapping { &[] } else { &series.driver },
         style::CYAN,
     );
     tile(

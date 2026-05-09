@@ -3,7 +3,7 @@
 //! gives true proportional spacing (ratatui's built-in axis labels skew the
 //! first and last gaps).
 
-use crate::brainrot::aggregate::{bot_score, driver_score, Aggregate};
+use crate::brainrot::aggregate::{bot_score, driver_is_bootstrapping, driver_score, Aggregate};
 use crate::ledger_read::Record;
 use crate::tui::style;
 use crate::tui::{App, RangePreset};
@@ -13,6 +13,24 @@ use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Axis, Chart, Dataset, GraphType, Paragraph};
 use ratatui::Frame;
+
+/// Minimum records per bucket before bot_score is plotted. Heavily-shrunk
+/// scores from tiny buckets cluster around 50 and just add visual noise
+/// that hides the actual signal. This threshold matches the bot_score
+/// confidence ramp's lower-end (10% confidence at n=5).
+const MIN_BUCKET_N: usize = 5;
+
+/// Compute the effective time window for chart rendering. Uses the active
+/// data span (first → last record) when records exist; otherwise falls back
+/// to the calendar range. Matches the metrics-tile sparkline behavior so a
+/// "today" view with 30min of activity in the last hour spreads its data
+/// across the full chart width instead of clumping on the right edge.
+fn effective_range(app: &App) -> (f64, f64) {
+    match (app.agg.first_ts, app.agg.last_ts) {
+        (Some(f), Some(l)) if l > f => (f, l),
+        _ => (app.range.since, app.range.until),
+    }
+}
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let inner = style::panel(f, area, "brainrot");
@@ -116,56 +134,68 @@ fn range_chips(f: &mut Frame, area: Rect, app: &App) {
 
 fn chart(f: &mut Frame, area: Rect, app: &App) {
     let bucket_count = ((area.width as usize).saturating_sub(8)).max(20);
-    let span = (app.range.until - app.range.since).max(1.0);
+    let (since, until) = effective_range(app);
+    let span = (until - since).max(1.0);
     let bucket_s = span / bucket_count as f64;
 
     let mut by_bucket: Vec<Vec<Record>> = (0..bucket_count).map(|_| Vec::new()).collect();
     for r in &app.agg.records {
-        let idx = ((r.ts - app.range.since) / bucket_s).floor() as i64;
-        if idx >= 0 && (idx as usize) < bucket_count {
-            by_bucket[idx as usize].push(r.clone());
-        }
+        let idx = ((r.ts - since) / bucket_s).floor() as i64;
+        let clamped = if idx < 0 { 0 } else { (idx as usize).min(bucket_count - 1) };
+        by_bucket[clamped].push(r.clone());
     }
+
+    // Driver bootstrap detection — when the baseline has no u_ch records yet,
+    // every per-bucket driver_score returns 50 by design. Drawing that as a
+    // flat horizontal line at the chart midline is misleading AND it sits
+    // exactly where bot_score values cluster after sample-size shrinkage,
+    // hiding the bot line entirely. Skip the driver series in that case.
+    let driver_bootstrapping = driver_is_bootstrapping(&app.baseline);
 
     let mut bot_pts: Vec<(f64, f64)> = Vec::new();
     let mut drv_pts: Vec<(f64, f64)> = Vec::new();
     for (i, bucket) in by_bucket.into_iter().enumerate() {
-        if bucket.is_empty() {
+        if bucket.len() < MIN_BUCKET_N {
             continue;
         }
-        let mid_ts = app.range.since + bucket_s * (i as f64 + 0.5);
+        let mid_ts = since + bucket_s * (i as f64 + 0.5);
         let bucket_agg = Aggregate::ingest(bucket);
         bot_pts.push((mid_ts, bot_score(&bucket_agg, &app.baseline) as f64));
-        drv_pts.push((mid_ts, driver_score(&bucket_agg, &app.baseline) as f64));
+        if !driver_bootstrapping {
+            drv_pts.push((mid_ts, driver_score(&bucket_agg, &app.baseline) as f64));
+        }
     }
 
-    let datasets = vec![
-        Dataset::default()
-            .name("bot")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(style::PINK))
-            .data(&bot_pts),
-        Dataset::default()
-            .name("driver")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(style::CYAN))
-            .data(&drv_pts),
-    ];
+    let mut datasets = vec![Dataset::default()
+        .name("bot")
+        .marker(symbols::Marker::Braille)
+        .graph_type(GraphType::Line)
+        .style(Style::default().fg(style::PINK))
+        .data(&bot_pts)];
+    if !driver_bootstrapping {
+        datasets.push(
+            Dataset::default()
+                .name("driver")
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(style::CYAN))
+                .data(&drv_pts),
+        );
+    }
 
-    // Empty x-axis labels — we paint our own below the chart.
+    // X-axis bounds match the effective range so the line spans the full
+    // chart width — no x-axis labels passed (we paint our own below).
     let x_axis = Axis::default()
-        .bounds([app.range.since, app.range.until])
+        .bounds([since, until])
         .style(Style::default().fg(style::GREY));
 
     let y_axis = Axis::default()
         .bounds([0.0, 100.0])
         .labels(vec![
-            Span::styled("0", style::dim()),
-            Span::styled("25", style::dim()),
-            Span::styled("50", style::dim()),
-            Span::styled("75", style::dim()),
+            Span::styled("  0", style::dim()),
+            Span::styled(" 25", style::dim()),
+            Span::styled(" 50", style::dim()),
+            Span::styled(" 75", style::dim()),
             Span::styled("100", style::dim()),
         ])
         .style(Style::default().fg(style::GREY));
@@ -189,7 +219,11 @@ fn paint_x_labels(f: &mut Frame, chart_area: Rect, label_row: Rect, app: &App) {
         return;
     }
 
-    let span_secs = (app.range.until - app.range.since).max(1.0);
+    // Match chart()'s x-axis bounds. Use active span when there's data so
+    // labels reflect the actual time range the line covers, not the empty
+    // calendar window.
+    let (since, until) = effective_range(app);
+    let span_secs = (until - since).max(1.0);
     // 7 labels for the 7-day range (one per day boundary), 12 otherwise.
     let n_labels: usize = if span_secs > 6.5 * 86400.0 && span_secs < 7.5 * 86400.0 {
         7
@@ -218,7 +252,7 @@ fn paint_x_labels(f: &mut Frame, chart_area: Rect, label_row: Rect, app: &App) {
         } else {
             i as f64 / (n_labels - 1) as f64
         };
-        let epoch = app.range.since + fraction * (app.range.until - app.range.since);
+        let epoch = since + fraction * (until - since);
         let text = axis_label(epoch, span_secs);
         let text_w = text.chars().count() as u16;
         if text_w == 0 {

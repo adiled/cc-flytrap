@@ -480,6 +480,14 @@ fn group_records_by_sid_basic(records: &[Record]) -> HashMap<String, Vec<usize>>
 const MIN_UCH_RECORDS_WINDOW: u64 = 5;
 const MIN_UCH_RECORDS_BASELINE: u64 = 50;
 
+/// Whether the driver-score baseline has accumulated enough new-schema
+/// records to score against. Callers use this to render the driver tile
+/// as "—" rather than a misleading neutral 50, and to omit the driver
+/// line from charts entirely when bootstrapping.
+pub fn driver_is_bootstrapping(baseline: &Baseline) -> bool {
+    baseline.n_records_with_u_ch < MIN_UCH_RECORDS_BASELINE
+}
+
 fn driver_chars_per_min(a: &Aggregate) -> Option<f64> {
     // Sum u_ch within the window, divide by active span. This is the
     // cumulative kinetic — parallel sessions naturally add up because we
