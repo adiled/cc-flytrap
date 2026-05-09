@@ -191,11 +191,14 @@ fn chart(f: &mut Frame, area: Rect, app: &App) {
 
     let y_axis = Axis::default()
         .bounds([0.0, 100.0])
+        // 3 labels (2 intervals) — ratatui rounds label positions to whole
+        // rows. With 5 labels (4 intervals) the gaps come out 3-3-4-3 unless
+        // chart_h is exactly divisible by 4. Two intervals only need
+        // chart_h % 2 == 0 which is far more often satisfied, and even when
+        // off by 1, the visual asymmetry is half a row instead of a whole.
         .labels(vec![
             Span::styled("  0", style::dim()),
-            Span::styled(" 25", style::dim()),
             Span::styled(" 50", style::dim()),
-            Span::styled(" 75", style::dim()),
             Span::styled("100", style::dim()),
         ])
         .style(Style::default().fg(style::GREY));

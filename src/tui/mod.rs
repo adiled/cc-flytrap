@@ -336,9 +336,9 @@ fn body(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
         .direction(Direction::Vertical)
         .spacing(1)
         .constraints([
-            Constraint::Percentage(35),
+            Constraint::Percentage(45),
             Constraint::Percentage(22),
-            Constraint::Percentage(43),
+            Constraint::Percentage(33),
         ])
         .split(cols[1]);
 
