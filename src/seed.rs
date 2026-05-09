@@ -229,8 +229,11 @@ fn ts_of_raw(raw: &str) -> Option<f64> {
 }
 
 /// Walk every JSONL under `dir`, pair each user event with the next
-/// assistant event in the same session, emit one Turn per pair (plus
-/// trailing lone user events with te=None, which the caller filters out).
+/// assistant event (in chronological order — events are NOT always
+/// written in ts order in the JSONL, e.g. when Claude Code logs the
+/// assistant response slightly before the corresponding user message
+/// hits disk). Emits one Turn per pair, plus trailing lone user events
+/// with te=None which the caller filters out.
 fn collect_all_turns(
     dir: &Path,
     only_sid: Option<&str>,
@@ -239,7 +242,9 @@ fn collect_all_turns(
     walk_jsonl(dir, &mut |p| {
         let Ok(f) = fs::File::open(p) else { return };
         let reader = BufReader::new(f);
-        let mut pending_user: Option<Turn> = None;
+
+        // First pass: collect every (ts, kind, value) we care about.
+        let mut events: Vec<(f64, String, Value)> = Vec::new();
         for line in reader.lines().map_while(Result::ok) {
             let line = line.trim();
             if line.is_empty() {
@@ -247,6 +252,9 @@ fn collect_all_turns(
             }
             let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
             let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if kind != "user" && kind != "assistant" {
+                continue;
+            }
             let sid = v.get("sessionId").and_then(|s| s.as_str()).unwrap_or("");
             if sid.is_empty() {
                 continue;
@@ -256,13 +264,23 @@ fn collect_all_turns(
                     continue;
                 }
             }
-            let ts = v
+            let Some(ts) = v
                 .get("timestamp")
                 .and_then(|t| t.as_str())
-                .and_then(parse_iso8601);
-            let Some(ts) = ts else { continue };
+                .and_then(parse_iso8601)
+            else { continue };
+            events.push((ts, kind.to_string(), v));
+        }
 
-            match kind {
+        // Sort by ts so user→assistant pairing is correct even when the
+        // file's line order doesn't match wall-clock order.
+        events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Second pass: pair user→next assistant within the same session.
+        let mut pending_user: Option<Turn> = None;
+        for (ts, kind, v) in events {
+            let sid = v.get("sessionId").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            match kind.as_str() {
                 "user" => {
                     if let Some(t) = pending_user.take() {
                         all_turns.push(t);
@@ -270,7 +288,7 @@ fn collect_all_turns(
                     let content = v.get("message").and_then(|m| m.get("content"));
                     let (u_ch, tr_ch) = count_user_chars(content);
                     pending_user = Some(Turn {
-                        sid: sid.to_string(),
+                        sid,
                         ts,
                         te: None,
                         u_ch, tr_ch,
@@ -280,6 +298,12 @@ fn collect_all_turns(
                 }
                 "assistant" => {
                     let Some(mut t) = pending_user.take() else { continue };
+                    if t.sid != sid {
+                        // Cross-session interleave — push the user as orphan
+                        // and skip this assistant (it has no matching user).
+                        all_turns.push(t);
+                        continue;
+                    }
                     let msg = v.get("message");
                     let usage = msg.and_then(|m| m.get("usage"));
                     t.te = Some(ts);
