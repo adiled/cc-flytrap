@@ -25,6 +25,14 @@ pub struct Record {
     pub cr: u64,
     pub cc: u64,
     pub c_us: Option<u64>,
+    /// Chars in the LAST user message of the request, when that message is
+    /// plain text (i.e. fresh human input this turn). 0 when the last user
+    /// message is a tool_result (bot-loop continuation), or when the field
+    /// isn't present in the record (older schema).
+    pub u_ch: u64,
+    /// Chars in the LAST user message of the request, when that message is
+    /// a tool_result (bot-loop feedback). Counterpart to u_ch.
+    pub tr_ch: u64,
 }
 
 impl Record {
@@ -46,6 +54,8 @@ impl Record {
             cr: u("cr"),
             cc: u("cc"),
             c_us: opt_u("c_us"),
+            u_ch: u("u_ch"),
+            tr_ch: u("tr_ch"),
         })
     }
 }

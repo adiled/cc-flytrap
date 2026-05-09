@@ -40,7 +40,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let bot = bot_score(&app.agg, &app.baseline);
     let drv = driver_score(&app.agg, &app.baseline);
     let mut lats = app.agg.lats.clone();
-    let p99 = percentile(&mut lats, 99.0) as u64;
+    let p50 = percentile(&mut lats.clone(), 50.0) as u64;
+    let lat_word = lat_tier_word(p50 as f64, &app.baseline);
     // Cache offload: of *all* input the model had to ingest, what fraction
     // came from cache (cheap path). Includes uncached `in` in the denominator
     // so the metric reflects how much of the total burden is being offloaded,
@@ -81,10 +82,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     tile(
         f,
         cells[2],
-        "P99 LAT",
-        &style::fmt_lat(p99),
-        "p99",
-        &series.p99,
+        "LAT",
+        &style::fmt_lat(p50),
+        lat_word,
+        &series.p99, // sparkline still shows p99-per-bucket for tail awareness
         style::GOLD,
     );
     tile(
@@ -96,6 +97,30 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         &series.cache,
         style::LIME,
     );
+}
+
+// ─── Latency tier word labels (dynamic against user's own baseline) ─────────
+
+/// Map a current p50 latency to a word label by where it falls in the
+/// user's own historical latency distribution. Each user's "quick" is
+/// calibrated to *their* normal — no static thresholds.
+///
+/// Falls back to "—" when there's no baseline yet.
+fn lat_tier_word(cur_ms: f64, baseline: &Baseline) -> &'static str {
+    if baseline.lat_p80 <= 0.0 {
+        return "—";
+    }
+    if cur_ms < baseline.lat_p20 {
+        "quick"
+    } else if cur_ms < baseline.lat_p40 {
+        "fast"
+    } else if cur_ms < baseline.lat_p60 {
+        "mid"
+    } else if cur_ms < baseline.lat_p80 {
+        "slow"
+    } else {
+        "sloth"
+    }
 }
 
 // ─── Tile rendering ──────────────────────────────────────────────────────────
@@ -221,14 +246,26 @@ struct Series {
 }
 
 fn compute_series(app: &App, n: usize) -> Series {
-    let span = (app.range.until - app.range.since).max(1.0);
+    // Bucket across the *active* span (first → last record), not the
+    // calendar window. Otherwise a window like "today" with 30min of
+    // activity in the last hour spreads its records into 1 of 30 buckets
+    // and the chart looks blank. Falls back to the configured range when
+    // there's no data.
+    let (since, until) = match (app.agg.first_ts, app.agg.last_ts) {
+        (Some(f), Some(l)) if l > f => (f, l),
+        _ => (app.range.since, app.range.until),
+    };
+    let span = (until - since).max(1.0);
     let bucket_s = span / n as f64;
 
     let mut buckets: Vec<Vec<Record>> = (0..n).map(|_| Vec::new()).collect();
     for r in &app.agg.records {
-        let idx = ((r.ts - app.range.since) / bucket_s).floor() as i64;
+        let idx = ((r.ts - since) / bucket_s).floor() as i64;
         if idx >= 0 && (idx as usize) < n {
             buckets[idx as usize].push(r.clone());
+        } else if idx as usize >= n {
+            // Last record exactly at `until` lands at idx=n; clamp.
+            buckets[n - 1].push(r.clone());
         }
     }
 

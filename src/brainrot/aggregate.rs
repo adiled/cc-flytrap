@@ -138,7 +138,10 @@ fn quantile(xs: &mut [f64], q: f64) -> f64 {
     xs[f] + (xs[c] - xs[f]) * (k - f as f64)
 }
 
-/// Ordinary-least-squares slope of y on x. 0 when degenerate.
+/// Ordinary-least-squares slope of y on x. 0 when degenerate. Kept for
+/// future regime-change detection on inter-arrival gaps; not currently
+/// wired into any score, but cheap to retain.
+#[allow(dead_code)]
 fn slope(pairs: &[(f64, f64)]) -> f64 {
     let n = pairs.len();
     if n < 3 {
@@ -255,6 +258,23 @@ pub struct Baseline {
 
     // Window-rate scalar (sessions/hour over the entire baseline span)
     pub sessions_per_hour: f64,
+
+    // Driver kinetics: user-typed chars per minute, computed as a robust
+    // distribution over per-record chars/min slots. Only populated from
+    // records that have the new u_ch field (post-schema bump); older
+    // records contribute u_ch=0, which we filter out to avoid biasing
+    // the baseline downward.
+    pub user_chars_per_min_med: f64,
+    pub user_chars_per_min_mad: f64,
+    pub n_records_with_u_ch: u64,
+
+    // Latency-tier percentiles (for dynamic word labels). Computed from
+    // baseline ms_per_token distribution so each user gets thresholds
+    // calibrated to their own normal.
+    pub lat_p20: f64,
+    pub lat_p40: f64,
+    pub lat_p60: f64,
+    pub lat_p80: f64,
 }
 
 impl Baseline {
@@ -348,6 +368,49 @@ impl Baseline {
         let span_hours = ((last_ts - first_ts) / 3600.0).max(1.0 / 60.0);
         let sessions_per_hour = n_sessions as f64 / span_hours;
 
+        // Driver kinetics: per-record chars/min slot. Each record represents
+        // one API request, which packages a single human turn (or zero
+        // chars when it's a tool-loop continuation). The "minute" denominator
+        // is the time gap from the previous record in the same session,
+        // floored at 1s so a burst doesn't divide by zero. We keep only
+        // records where u_ch > 0 — that filters out historical records
+        // (pre-schema-bump) AND tool-loop continuations.
+        let mut u_chars_per_min: Vec<f64> = Vec::new();
+        let mut n_records_with_u_ch = 0u64;
+        let by_sid_for_uch = group_records_by_sid_basic(records);
+        for (_sid, mut idxs) in by_sid_for_uch {
+            idxs.sort_by(|a, b| {
+                records[*a]
+                    .ts
+                    .partial_cmp(&records[*b].ts)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut prev_ts: Option<f64> = None;
+            for i in idxs {
+                let r = &records[i];
+                if r.u_ch > 0 {
+                    n_records_with_u_ch += 1;
+                    let gap_s = match prev_ts {
+                        Some(p) => (r.ts - p).max(1.0),
+                        None => 60.0, // first turn of a session: assume ~1min
+                    };
+                    let chars_per_min = r.u_ch as f64 / (gap_s / 60.0);
+                    u_chars_per_min.push(chars_per_min);
+                }
+                prev_ts = Some(r.ts);
+            }
+        }
+        let user_chars_per_min_med = median(&u_chars_per_min);
+        let user_chars_per_min_mad = mad(&u_chars_per_min, user_chars_per_min_med);
+
+        // Latency-tier percentiles (lat in ms across all records)
+        let mut lats: Vec<f64> = records.iter().map(|r| r.lat as f64).collect();
+        lats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let lat_p20 = quantile(&mut lats.clone(), 0.20);
+        let lat_p40 = quantile(&mut lats.clone(), 0.40);
+        let lat_p60 = quantile(&mut lats.clone(), 0.60);
+        let lat_p80 = quantile(&mut lats.clone(), 0.80);
+
         Self {
             n_records: records.len() as u64,
             n_sessions,
@@ -365,6 +428,13 @@ impl Baseline {
             gap_cv_med,
             gap_cv_mad,
             sessions_per_hour,
+            user_chars_per_min_med,
+            user_chars_per_min_mad,
+            n_records_with_u_ch,
+            lat_p20,
+            lat_p40,
+            lat_p60,
+            lat_p80,
         }
     }
 }
@@ -378,114 +448,51 @@ fn group_records_by_sid(records: &[Record]) -> HashMap<String, Vec<Record>> {
     m
 }
 
-// ─── Driver-side (kinetics-focused) ──────────────────────────────────────────
-//
-// Driver score measures how the human is INPUTTING into the system. Five
-// components, each self-normalized against the user's baseline:
-//
-//   sprawl       — sessions per hour vs typical (high = scattered attention)
-//   pace         — CV of inter-arrival gaps within sessions (high = bursty)
-//   bloat        — median input tokens per request vs typical
-//   thrash       — unique models per session vs typical
-//   acceleration — slope of inter-arrival gaps over time (panic vs focus)
+/// Index-only group-by-sid (avoids cloning Records when the caller only
+/// needs to walk indices into the original slice).
+fn group_records_by_sid_basic(records: &[Record]) -> HashMap<String, Vec<usize>> {
+    let mut m: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, r) in records.iter().enumerate() {
+        let sid = r.sid.clone().unwrap_or_else(|| "_orphan".into());
+        m.entry(sid).or_default().push(i);
+    }
+    m
+}
 
-fn driver_sprawl(a: &Aggregate, baseline: &Baseline) -> f64 {
-    let Some(first) = a.first_ts else { return 50.0 };
+// ─── Driver-side (human-input kinetics) ──────────────────────────────────────
+//
+// Driver score measures the kinetic load the human is putting on the system:
+// how many user-typed characters per minute are being produced, summed
+// cumulatively across all active sessions in the window. Parallel sessions
+// stack additively — driving 4 simultaneously is 4× the brain-burn, not
+// the average per session.
+//
+// The metric ignores tool-loop continuations (which are bot-driven, not
+// human-driven). It distinguishes them via the per-record u_ch field
+// captured at request time: u_ch > 0 means the last user message of that
+// request was plain text (fresh human input); u_ch == 0 means it was a
+// tool_result (bot continuation) or the record predates the schema bump.
+//
+// When a window has too few new-schema records (< MIN_UCH_RECORDS), the
+// driver score returns a neutral 50 with an "insufficient data" signal —
+// it doesn't pretend to know.
+
+const MIN_UCH_RECORDS_WINDOW: u64 = 5;
+const MIN_UCH_RECORDS_BASELINE: u64 = 50;
+
+fn driver_chars_per_min(a: &Aggregate) -> Option<f64> {
+    // Sum u_ch within the window, divide by active span. This is the
+    // cumulative kinetic — parallel sessions naturally add up because we
+    // sum the chars regardless of which session contributed them.
+    let total_u_ch: u64 = a.records.iter().map(|r| r.u_ch).sum();
+    let with_u_ch: u64 = a.records.iter().filter(|r| r.u_ch > 0).count() as u64;
+    if with_u_ch < MIN_UCH_RECORDS_WINDOW {
+        return None;
+    }
+    let first = a.first_ts?;
     let last = a.last_ts.unwrap_or(first);
-    let span_h = ((last - first) / 3600.0).max(1.0 / 60.0);
-    let cur = a.sessions.len() as f64 / span_h;
-    // Synthetic dispersion: ±40% of baseline, floored at 0.2 sess/h to
-    // prevent infinitely large z when baseline is near zero.
-    let synth_mad = (baseline.sessions_per_hour * 0.4).max(0.2);
-    let z = robust_z(cur, baseline.sessions_per_hour, synth_mad);
-    logistic_score(z, 1.5)
-}
-
-fn driver_pace(a: &Aggregate, baseline: &Baseline) -> f64 {
-    let by_sid = group_records_by_sid(&a.records);
-    let cvs: Vec<f64> = by_sid
-        .values()
-        .filter(|recs| recs.len() >= 3)
-        .map(|recs| {
-            let mut sorted = recs.clone();
-            sorted.sort_by(|a, b| {
-                a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let gaps: Vec<f64> =
-                sorted.windows(2).map(|w| w[1].ts - w[0].ts).collect();
-            cv(&gaps)
-        })
-        .collect();
-    if cvs.is_empty() {
-        return 50.0;
-    }
-    let cur = median(&cvs);
-    let z = robust_z(cur, baseline.gap_cv_med, baseline.gap_cv_mad);
-    logistic_score(z, 1.5)
-}
-
-fn driver_bloat(a: &Aggregate, baseline: &Baseline) -> f64 {
-    if a.records.is_empty() {
-        return 50.0;
-    }
-    let ins: Vec<f64> = a.records.iter().map(|r| r.r#in as f64).collect();
-    let cur = median(&ins);
-    let z = robust_z(cur, baseline.in_med, baseline.in_mad);
-    logistic_score(z, 1.5)
-}
-
-fn driver_thrash(a: &Aggregate, baseline: &Baseline) -> f64 {
-    let by_sid = group_records_by_sid(&a.records);
-    if by_sid.is_empty() {
-        return 50.0;
-    }
-    let counts: Vec<f64> = by_sid
-        .values()
-        .map(|recs| {
-            let mut models: HashSet<String> = HashSet::new();
-            for r in recs {
-                if let Some(m) = &r.model {
-                    models.insert(m.clone());
-                }
-            }
-            models.len() as f64
-        })
-        .collect();
-    let cur = median(&counts);
-    let z = robust_z(cur, baseline.session_models_med, baseline.session_models_mad);
-    logistic_score(z, 1.5)
-}
-
-/// Acceleration: do gaps between requests within sessions trend up (slowing
-/// down / focus drift) or down (speeding up / panic mode)? Score uses |z|
-/// because either direction is a regime change worth flagging.
-fn driver_acceleration(a: &Aggregate) -> f64 {
-    let by_sid = group_records_by_sid(&a.records);
-    let slopes: Vec<f64> = by_sid
-        .values()
-        .filter(|recs| recs.len() >= 4)
-        .map(|recs| {
-            let mut sorted = recs.clone();
-            sorted.sort_by(|a, b| {
-                a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let gaps: Vec<f64> =
-                sorted.windows(2).map(|w| w[1].ts - w[0].ts).collect();
-            let pairs: Vec<(f64, f64)> = gaps
-                .iter()
-                .enumerate()
-                .map(|(i, g)| (i as f64, *g))
-                .collect();
-            slope(&pairs)
-        })
-        .collect();
-    if slopes.is_empty() {
-        return 50.0;
-    }
-    let cur = median(&slopes);
-    let dispersion = mad(&slopes, cur).max(0.5);
-    let z = robust_z(cur, 0.0, dispersion).abs();
-    logistic_score(z, 1.5)
+    let span_min = ((last - first) / 60.0).max(1.0);
+    Some(total_u_ch as f64 / span_min)
 }
 
 /// Sample-size confidence factor in [0, 1]. With few records the per-window
@@ -512,14 +519,21 @@ pub fn driver_score(a: &Aggregate, baseline: &Baseline) -> u32 {
     if a.n == 0 || baseline.n_records == 0 {
         return 0;
     }
-    let sprawl = driver_sprawl(a, baseline);
-    let pace = driver_pace(a, baseline);
-    let bloat = driver_bloat(a, baseline);
-    let thrash = driver_thrash(a, baseline);
-    let accel = driver_acceleration(a);
-    let composite =
-        sprawl * 0.25 + pace * 0.20 + bloat * 0.25 + thrash * 0.15 + accel * 0.15;
-    let shrunk = shrink(composite, confidence(a.n));
+    // Insufficient new-schema baseline → can't z-score against history.
+    // Insufficient new-schema window → can't compute current rate.
+    // Both cases return neutral 50.
+    if baseline.n_records_with_u_ch < MIN_UCH_RECORDS_BASELINE {
+        return 50;
+    }
+    let Some(cur_cpm) = driver_chars_per_min(a) else {
+        return 50;
+    };
+    // Floor MAD so a too-tight baseline can't make z explode.
+    let mad_floor = (baseline.user_chars_per_min_med * 0.20).max(5.0);
+    let mad = baseline.user_chars_per_min_mad.max(mad_floor);
+    let z = robust_z(cur_cpm, baseline.user_chars_per_min_med, mad);
+    let raw = logistic_score(z, 1.5);
+    let shrunk = shrink(raw, confidence(a.n));
     shrunk.round().clamp(0.0, 100.0) as u32
 }
 
@@ -602,6 +616,70 @@ pub fn bot_score(a: &Aggregate, baseline: &Baseline) -> u32 {
         brevity * 0.35 + stalling * 0.25 + wandering * 0.25 + cache_drag * 0.15;
     let shrunk = shrink(composite, confidence(a.n));
     shrunk.round().clamp(0.0, 100.0) as u32
+}
+
+/// Diagnostic dump of every score component for one window. Use it to
+/// validate that the headline numbers come from the components you expect.
+pub fn score_breakdown(
+    a: &Aggregate,
+    baseline: &Baseline,
+) -> ScoreBreakdown {
+    let conf = confidence(a.n);
+
+    // Driver: kinetic chars/min vs baseline median.
+    let total_u_ch: u64 = a.records.iter().map(|r| r.u_ch).sum();
+    let with_u_ch: u64 = a.records.iter().filter(|r| r.u_ch > 0).count() as u64;
+    let cur_cpm = driver_chars_per_min(a).unwrap_or(0.0);
+    let mad_floor = (baseline.user_chars_per_min_med * 0.20).max(5.0);
+    let used_mad = baseline.user_chars_per_min_mad.max(mad_floor);
+    let driver_z = if used_mad > 1e-9 {
+        (cur_cpm - baseline.user_chars_per_min_med) / used_mad
+    } else {
+        0.0
+    };
+    let d_raw = logistic_score(driver_z, 1.5);
+    let d_shrunk = shrink(d_raw, conf);
+
+    let b_brevity = bot_brevity(a, baseline);
+    let b_stalling = bot_stalling(a, baseline);
+    let b_wandering = bot_wandering(a, baseline);
+    let b_cache_drag = bot_cache_drag(a, baseline);
+    let b_raw =
+        b_brevity * 0.35 + b_stalling * 0.25 + b_wandering * 0.25 + b_cache_drag * 0.15;
+
+    ScoreBreakdown {
+        n: a.n,
+        confidence: conf,
+        d_total_u_ch: total_u_ch,
+        d_with_u_ch: with_u_ch,
+        d_chars_per_min: cur_cpm,
+        d_baseline_cpm: baseline.user_chars_per_min_med,
+        d_baseline_mad: used_mad,
+        d_z: driver_z,
+        d_raw, d_shrunk,
+        b_brevity, b_stalling, b_wandering, b_cache_drag,
+        b_raw, b_shrunk: shrink(b_raw, conf),
+    }
+}
+
+#[derive(Debug)]
+pub struct ScoreBreakdown {
+    pub n: u64,
+    pub confidence: f64,
+    pub d_total_u_ch: u64,
+    pub d_with_u_ch: u64,
+    pub d_chars_per_min: f64,
+    pub d_baseline_cpm: f64,
+    pub d_baseline_mad: f64,
+    pub d_z: f64,
+    pub d_raw: f64,
+    pub d_shrunk: f64,
+    pub b_brevity: f64,
+    pub b_stalling: f64,
+    pub b_wandering: f64,
+    pub b_cache_drag: f64,
+    pub b_raw: f64,
+    pub b_shrunk: f64,
 }
 
 // ─── Labels ──────────────────────────────────────────────────────────────────

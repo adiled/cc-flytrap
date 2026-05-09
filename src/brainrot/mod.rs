@@ -10,6 +10,7 @@
 //!   split           — bot/driver turn split  (TODO: stub)
 
 pub mod aggregate;
+mod debug_scores;
 mod diff;
 mod replay;
 mod score;
@@ -32,6 +33,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "session" => session::run(rest),
         "replay" => replay::run(rest),
         "diff" => diff::run(rest),
+        "debug-scores" => debug_scores::run(&spec),
         "help" | "--help" | "-h" => {
             println!("{}", USAGE);
             Ok(())

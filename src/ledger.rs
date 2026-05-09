@@ -1,8 +1,15 @@
 //! Ledger writer — appends one JSONL record per /v1/messages response.
-//! Schema mirrors cc-flytrap/ledger.py exactly so brainrot reads it unchanged.
+//! Schema mirrors cc-flytrap/ledger.py with two additions:
 //!
 //!   { ts, te, dt, human, agent, sid, cip, pip, sip, ep, reg, model,
-//!     in, out, tot, lat, cr, cc, c_us }
+//!     in, out, tot, lat, cr, cc, c_us, u_ch, tr_ch }
+//!
+//! `u_ch`/`tr_ch` are the char counts of the LAST user message in the
+//! request body, split by content type:
+//!   * u_ch  — chars when the message is plain text (fresh human input)
+//!   * tr_ch — chars when the message is a tool_result (bot continuation)
+//! Old records lacking these fields default to 0 on read; the driver
+//! score function refuses to compute against an empty u_ch baseline.
 //!
 //! Path: ~/.local/share/ccft/ledger.jsonl, override via $CCFT_LEDGER.
 //! State path: ledger.jsonl's parent / state.jsonl.
@@ -99,6 +106,13 @@ pub struct LedgerRecord<'a> {
     pub cache_read: u64,
     pub cache_creation: u64,
     pub ccft_us: u64,
+    /// Chars in the LAST user message of the request, when that message is
+    /// plain text (fresh human input). 0 when last user message is a
+    /// tool_result. See driver-kinetics scoring in brainrot/aggregate.rs.
+    pub user_text_chars: u64,
+    /// Chars in the LAST user message when it's a tool_result (bot-loop
+    /// continuation feedback). Counterpart to user_text_chars.
+    pub tool_result_chars: u64,
 }
 
 pub fn append(rec: &LedgerRecord) {
@@ -129,6 +143,8 @@ pub fn append(rec: &LedgerRecord) {
         "cr": rec.cache_read,
         "cc": rec.cache_creation,
         "c_us": rec.ccft_us,
+        "u_ch": rec.user_text_chars,
+        "tr_ch": rec.tool_result_chars,
     })
     .to_string();
 

@@ -43,6 +43,11 @@ pub struct FlowMeta {
     pub ccft_us_req: u64,
     pub endpoint: String,
     pub server_ip: Option<String>,
+    /// Chars in the LAST user message of the request when it's plain text
+    /// (fresh human input). 0 when the last user message is a tool_result.
+    pub user_text_chars: u64,
+    /// Chars in the LAST user message when it's a tool_result.
+    pub tool_result_chars: u64,
 }
 
 type FlowKey = (String, String);
@@ -82,6 +87,67 @@ fn now_wall_secs() -> f64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+/// Inspect the LAST user message of an Anthropic /v1/messages request body
+/// and return (text_chars, tool_result_chars). When the message is plain
+/// text the first counter is populated; when it's a tool_result the second
+/// is. We use this distinction to drive the kinetics-only "driver" score
+/// downstream — gap-based heuristics conflate bot tool-loops with humans
+/// pushing hard, but the message-role payload tells us exactly which it is.
+///
+/// Returns (0, 0) if parsing fails or the schema doesn't match — caller
+/// treats the absence as "unknown" rather than zero pressure.
+fn extract_user_message_chars(body_bytes: &[u8]) -> (u64, u64) {
+    let Ok(data): Result<Value, _> = serde_json::from_slice(body_bytes) else {
+        return (0, 0);
+    };
+    let Some(messages) = data.get("messages").and_then(|m| m.as_array()) else {
+        return (0, 0);
+    };
+    // Find the last message with role=user.
+    let last_user = messages
+        .iter()
+        .rev()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
+    let Some(msg) = last_user else { return (0, 0) };
+    let Some(content) = msg.get("content") else { return (0, 0) };
+
+    // content can be a string (older form) or an array of content blocks.
+    if let Some(s) = content.as_str() {
+        return (s.chars().count() as u64, 0);
+    }
+    let Some(blocks) = content.as_array() else { return (0, 0) };
+
+    let mut text = 0u64;
+    let mut tool = 0u64;
+    for b in blocks {
+        let kind = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match kind {
+            "text" => {
+                if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
+                    text += t.chars().count() as u64;
+                }
+            }
+            "tool_result" => {
+                // tool_result.content is itself either a string or an array
+                // of {type:"text", text:"..."} (or image) blocks.
+                if let Some(c) = b.get("content") {
+                    if let Some(s) = c.as_str() {
+                        tool += s.chars().count() as u64;
+                    } else if let Some(arr) = c.as_array() {
+                        for inner in arr {
+                            if let Some(t) = inner.get("text").and_then(|t| t.as_str()) {
+                                tool += t.chars().count() as u64;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (text, tool)
 }
 
 /// Mutate Anthropic request body. Returns a new body if mutated, or `None`.
@@ -189,6 +255,7 @@ impl HttpHandler for CcftHandler {
         };
 
         let session_id = session::extract(&parts.headers, Some(&collected));
+        let (user_text_chars, tool_result_chars) = extract_user_message_chars(&collected);
         let new_body = mutate_messages_body(&collected, &self.cfg).unwrap_or(collected);
 
         let _ = self.seq.fetch_add(1, Ordering::Relaxed);
@@ -204,6 +271,8 @@ impl HttpHandler for CcftHandler {
             ccft_us_req: t0.elapsed().as_micros() as u64,
             endpoint,
             server_ip: None,
+            user_text_chars,
+            tool_result_chars,
         };
         self.pending.entry(key).or_default().push(meta);
 

@@ -126,6 +126,8 @@ impl<B> SseTap<B> {
             cache_read: self.usage.cache_read_input_tokens,
             cache_creation: self.usage.cache_creation_input_tokens,
             ccft_us: self.meta.ccft_us_req,
+            user_text_chars: self.meta.user_text_chars,
+            tool_result_chars: self.meta.tool_result_chars,
         };
 
         ledger::append(&rec);
