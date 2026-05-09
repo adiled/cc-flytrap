@@ -47,6 +47,6 @@ The **range dial** at the bottom is the primary interactivity. Time is the X axi
 - [ratatui](https://ratatui.rs/) — TUI rendering
 - [tokio](https://tokio.rs/), [hyper](https://hyper.rs/) — async runtime + HTTP plumbing
 
-## Earlier pilot (lua/)
+## Earlier pilot (archived)
 
-`lua/` contains a pre-Rust pilot that ran cc-flytrap as a Lua plugin inside [proxelar](https://github.com/emanuele-em/proxelar) (a Rust HTTPS proxy). It worked for request mutation but proxelar buffers response bodies whenever a script is loaded — the streaming UX collapses to one chunk at end-of-stream. This Rust implementation was the response to that limit.
+[`docs/archive/lua/`](archive/lua/) contains a pre-Rust pilot that ran cc-flytrap as a Lua plugin inside [proxelar](https://github.com/emanuele-em/proxelar) (a Rust HTTPS proxy). It worked for request mutation but proxelar buffers response bodies whenever a script is loaded — the streaming UX collapses to one chunk at end-of-stream. This Rust implementation was the response to that limit.
