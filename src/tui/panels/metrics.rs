@@ -13,7 +13,7 @@
 //! shared `style::panel` renderer, so per-tile borders pick up the same
 //! energized rail treatment as the larger panels.
 
-use crate::brainrot::aggregate::{bot_score, driver_score, vibe_label, Aggregate};
+use crate::brainrot::aggregate::{bot_score, driver_score, vibe_label, Aggregate, Baseline};
 use crate::ledger_read::{percentile, Record};
 use crate::tui::style;
 use crate::tui::App;
@@ -37,8 +37,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         .split(area);
 
     // Whole-range aggregates (the BIG number per tile).
-    let bot = bot_score(&app.agg);
-    let drv = driver_score(&app.agg);
+    let bot = bot_score(&app.agg, &app.baseline);
+    let drv = driver_score(&app.agg, &app.baseline);
     let mut lats = app.agg.lats.clone();
     let p99 = percentile(&mut lats, 99.0) as u64;
     let cache_total = app.agg.records.iter().map(|r| r.cr + r.cc).sum::<u64>();
@@ -243,8 +243,8 @@ fn compute_series(app: &App, n: usize) -> Series {
         let cc_total: u64 = bucket.iter().map(|r| r.cc).sum();
 
         let agg = Aggregate::ingest(bucket);
-        bot[i] = bot_score(&agg) as f32 / 100.0;
-        driver[i] = driver_score(&agg) as f32 / 100.0;
+        bot[i] = bot_score(&agg, &app.baseline) as f32 / 100.0;
+        driver[i] = driver_score(&agg, &app.baseline) as f32 / 100.0;
         p99[i] = p99_v;
         cache[i] = if cr_total + cc_total > 0 {
             cr_total as f32 / (cr_total + cc_total) as f32

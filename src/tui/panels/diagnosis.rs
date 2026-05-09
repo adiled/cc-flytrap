@@ -21,8 +21,8 @@ use std::collections::HashMap;
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let inner = style::panel(f, area, "diagnosis");
 
-    let bot = bot_score(&app.agg);
-    let drv = driver_score(&app.agg);
+    let bot = bot_score(&app.agg, &app.baseline);
+    let drv = driver_score(&app.agg, &app.baseline);
     let mut lines: Vec<Line> = Vec::new();
 
     // ── vibe ────────────────────────────────────────────────────────────

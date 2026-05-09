@@ -157,118 +157,429 @@ fn slope(pairs: &[(f64, f64)]) -> f64 {
     }
 }
 
-// ─── Driver-side (V·V·P) ─────────────────────────────────────────────────────
+// ─── Robust statistics ───────────────────────────────────────────────────────
 
-fn driver_bloat(a: &Aggregate) -> f64 {
-    let avg_in = if a.n > 0 { a.r#in as f64 / a.n as f64 } else { 0.0 };
-    ((avg_in - 1000.0) / 200.0).clamp(0.0, 30.0)
-}
-
-fn driver_rapidfire(a: &Aggregate) -> f64 {
-    let mut g = a.gaps();
-    if g.is_empty() {
+fn median(xs: &[f64]) -> f64 {
+    if xs.is_empty() {
         return 0.0;
     }
-    let med = quantile(&mut g, 0.5);
-    if med >= 90.0 {
+    let mut s = xs.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = s.len();
+    if n.is_multiple_of(2) {
+        (s[n / 2 - 1] + s[n / 2]) / 2.0
+    } else {
+        s[n / 2]
+    }
+}
+
+/// Median Absolute Deviation, scaled to be comparable to stdev for a normal
+/// distribution (×1.4826). Robust to outliers — a single 100-second tool loop
+/// doesn't distort the dispersion estimate the way stdev would.
+fn mad(xs: &[f64], med: f64) -> f64 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    let dev: Vec<f64> = xs.iter().map(|x| (x - med).abs()).collect();
+    median(&dev) * 1.4826
+}
+
+/// Coefficient of variation = stdev / |mean|. Returns 0 for degenerate input.
+fn cv(xs: &[f64]) -> f64 {
+    if xs.len() < 2 {
+        return 0.0;
+    }
+    let n = xs.len() as f64;
+    let mean = xs.iter().sum::<f64>() / n;
+    let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+    let stdev = var.sqrt();
+    if mean.abs() < 1e-9 {
         0.0
     } else {
-        ((90.0 - med) / 3.6).min(25.0)
+        stdev / mean
     }
 }
 
-fn driver_burst(a: &Aggregate) -> f64 {
-    let mut g = a.gaps();
-    if g.len() < 5 {
+/// Robust z-score: `(x - median) / MAD`. Returns 0 when MAD is degenerate
+/// (no dispersion in the baseline) so we don't over-claim signal.
+fn robust_z(x: f64, med: f64, mad: f64) -> f64 {
+    if mad <= 1e-9 {
         return 0.0;
     }
-    let p10 = quantile(&mut g, 0.1);
-    let med = quantile(&mut g, 0.5);
-    if med <= 0.0 {
-        return 0.0;
-    }
-    let ratio = p10 / med;
-    ((0.3 - ratio) / 0.3 * 20.0).clamp(0.0, 20.0)
+    (x - med) / mad
 }
 
-fn driver_sprawl(a: &Aggregate) -> f64 {
-    let Some(first) = a.first_ts else { return 0.0 };
+/// Map a robust z-score to a 0..100 distress score:
+///   z = 0          →  50  (at baseline / typical)
+///   z = +scale     →  ~88 (notably worse than usual)
+///   z = -scale     →  ~12 (notably better than usual)
+///   z → ±∞         →  100 / 0 (saturates gracefully)
+///
+/// Convention: positive z means "more concerning" — each component flips its
+/// sign to ensure that holds (e.g., bot brevity uses `baseline - current` so
+/// shorter-than-usual output produces positive z).
+fn logistic_score(z: f64, scale: f64) -> f64 {
+    50.0 + 50.0 * (z / scale).tanh()
+}
+
+// ─── Baseline: the user's historical fingerprint ─────────────────────────────
+//
+// Computed once from the full ledger (or whatever set of records the caller
+// provides). Subsequent score computations on a window are z-scored against
+// this fingerprint. So "high score" means "this window is unusual for YOU,"
+// not "this window crosses some absolute threshold guessed at design time."
+
+#[derive(Default, Debug, Clone)]
+pub struct Baseline {
+    pub n_records: u64,
+    pub n_sessions: usize,
+
+    // Per-record metric distributions
+    pub out_med: f64,
+    pub out_mad: f64,
+    pub in_med: f64,
+    pub in_mad: f64,
+    pub ms_per_token_med: f64,
+    pub ms_per_token_mad: f64,
+
+    // Cache miss rate (single scalar)
+    pub cache_miss_rate: f64,
+
+    // Per-session statistic distributions
+    pub session_out_cv_med: f64,
+    pub session_out_cv_mad: f64,
+    pub session_models_med: f64,
+    pub session_models_mad: f64,
+    pub gap_cv_med: f64,
+    pub gap_cv_mad: f64,
+
+    // Window-rate scalar (sessions/hour over the entire baseline span)
+    pub sessions_per_hour: f64,
+}
+
+impl Baseline {
+    /// Empty baseline — used when no historical data exists yet (brand-new
+    /// install). Score functions interpret this as "no signal" and return 0.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Build a baseline fingerprint from an arbitrary record set. Typically
+    /// called with the entire ledger so subsequent windowed scores express
+    /// "deviation from your typical behavior."
+    pub fn from_records(records: &[Record]) -> Self {
+        if records.is_empty() {
+            return Self::default();
+        }
+
+        // Per-record arrays
+        let outs: Vec<f64> = records.iter().map(|r| r.out as f64).collect();
+        let ins: Vec<f64> = records.iter().map(|r| r.r#in as f64).collect();
+        let ms_per_token: Vec<f64> = records
+            .iter()
+            .filter(|r| r.out > 0)
+            .map(|r| r.lat as f64 / r.out as f64)
+            .collect();
+
+        let out_med = median(&outs);
+        let out_mad = mad(&outs, out_med);
+        let in_med = median(&ins);
+        let in_mad = mad(&ins, in_med);
+        let ms_per_token_med = median(&ms_per_token);
+        let ms_per_token_mad = mad(&ms_per_token, ms_per_token_med);
+
+        // Cache miss rate: cc / (cc + cr) globally. Single scalar — score
+        // functions use a synthetic MAD around it for z-scoring.
+        let total_cr: u64 = records.iter().map(|r| r.cr).sum();
+        let total_cc: u64 = records.iter().map(|r| r.cc).sum();
+        let cache_miss_rate = if total_cr + total_cc > 0 {
+            total_cc as f64 / (total_cr + total_cc) as f64
+        } else {
+            0.0
+        };
+
+        // Per-session metrics
+        let by_sid = group_records_by_sid(records);
+        let n_sessions = by_sid.len();
+
+        let mut session_out_cvs: Vec<f64> = Vec::new();
+        let mut session_models: Vec<f64> = Vec::new();
+        let mut session_gap_cvs: Vec<f64> = Vec::new();
+
+        for recs in by_sid.values() {
+            // Output-size CV within session (bot wandering)
+            let outs: Vec<f64> = recs.iter().map(|r| r.out as f64).collect();
+            session_out_cvs.push(cv(&outs));
+
+            // Unique models within session (driver thrash)
+            let mut models: HashSet<String> = HashSet::new();
+            for r in recs {
+                if let Some(m) = &r.model {
+                    models.insert(m.clone());
+                }
+            }
+            session_models.push(models.len() as f64);
+
+            // Inter-arrival gap CV within session (driver pace volatility)
+            let mut sorted = recs.clone();
+            sorted.sort_by(|a, b| {
+                a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if sorted.len() >= 3 {
+                let gaps: Vec<f64> =
+                    sorted.windows(2).map(|w| w[1].ts - w[0].ts).collect();
+                session_gap_cvs.push(cv(&gaps));
+            }
+        }
+
+        let session_out_cv_med = median(&session_out_cvs);
+        let session_out_cv_mad = mad(&session_out_cvs, session_out_cv_med);
+        let session_models_med = median(&session_models);
+        let session_models_mad = mad(&session_models, session_models_med);
+        let gap_cv_med = median(&session_gap_cvs);
+        let gap_cv_mad = mad(&session_gap_cvs, gap_cv_med);
+
+        // Sessions per hour over the full baseline span
+        let first_ts = records.iter().map(|r| r.ts).fold(f64::INFINITY, f64::min);
+        let last_ts = records
+            .iter()
+            .map(|r| r.ts)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let span_hours = ((last_ts - first_ts) / 3600.0).max(1.0 / 60.0);
+        let sessions_per_hour = n_sessions as f64 / span_hours;
+
+        Self {
+            n_records: records.len() as u64,
+            n_sessions,
+            out_med,
+            out_mad,
+            in_med,
+            in_mad,
+            ms_per_token_med,
+            ms_per_token_mad,
+            cache_miss_rate,
+            session_out_cv_med,
+            session_out_cv_mad,
+            session_models_med,
+            session_models_mad,
+            gap_cv_med,
+            gap_cv_mad,
+            sessions_per_hour,
+        }
+    }
+}
+
+fn group_records_by_sid(records: &[Record]) -> HashMap<String, Vec<Record>> {
+    let mut m: HashMap<String, Vec<Record>> = HashMap::new();
+    for r in records {
+        let sid = r.sid.clone().unwrap_or_else(|| "_orphan".into());
+        m.entry(sid).or_default().push(r.clone());
+    }
+    m
+}
+
+// ─── Driver-side (kinetics-focused) ──────────────────────────────────────────
+//
+// Driver score measures how the human is INPUTTING into the system. Five
+// components, each self-normalized against the user's baseline:
+//
+//   sprawl       — sessions per hour vs typical (high = scattered attention)
+//   pace         — CV of inter-arrival gaps within sessions (high = bursty)
+//   bloat        — median input tokens per request vs typical
+//   thrash       — unique models per session vs typical
+//   acceleration — slope of inter-arrival gaps over time (panic vs focus)
+
+fn driver_sprawl(a: &Aggregate, baseline: &Baseline) -> f64 {
+    let Some(first) = a.first_ts else { return 50.0 };
     let last = a.last_ts.unwrap_or(first);
     let span_h = ((last - first) / 3600.0).max(1.0 / 60.0);
-    let sess_count = a.sessions.len().max(1) as f64;
-    let sess_per_hour = sess_count / span_h;
-    let sprawl = ((sess_per_hour - 2.0) * 5.0).clamp(0.0, 15.0);
-    let n_models = a.models.len() as f64;
-    let thrash = if a.n > 5 {
-        ((n_models - 2.0) * 5.0).clamp(0.0, 10.0)
-    } else {
-        0.0
-    };
-    sprawl + thrash
+    let cur = a.sessions.len() as f64 / span_h;
+    // Synthetic dispersion: ±40% of baseline, floored at 0.2 sess/h to
+    // prevent infinitely large z when baseline is near zero.
+    let synth_mad = (baseline.sessions_per_hour * 0.4).max(0.2);
+    let z = robust_z(cur, baseline.sessions_per_hour, synth_mad);
+    logistic_score(z, 1.5)
 }
 
-pub fn driver_score(a: &Aggregate) -> u32 {
-    if a.n == 0 {
+fn driver_pace(a: &Aggregate, baseline: &Baseline) -> f64 {
+    let by_sid = group_records_by_sid(&a.records);
+    let cvs: Vec<f64> = by_sid
+        .values()
+        .filter(|recs| recs.len() >= 3)
+        .map(|recs| {
+            let mut sorted = recs.clone();
+            sorted.sort_by(|a, b| {
+                a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let gaps: Vec<f64> =
+                sorted.windows(2).map(|w| w[1].ts - w[0].ts).collect();
+            cv(&gaps)
+        })
+        .collect();
+    if cvs.is_empty() {
+        return 50.0;
+    }
+    let cur = median(&cvs);
+    let z = robust_z(cur, baseline.gap_cv_med, baseline.gap_cv_mad);
+    logistic_score(z, 1.5)
+}
+
+fn driver_bloat(a: &Aggregate, baseline: &Baseline) -> f64 {
+    if a.records.is_empty() {
+        return 50.0;
+    }
+    let ins: Vec<f64> = a.records.iter().map(|r| r.r#in as f64).collect();
+    let cur = median(&ins);
+    let z = robust_z(cur, baseline.in_med, baseline.in_mad);
+    logistic_score(z, 1.5)
+}
+
+fn driver_thrash(a: &Aggregate, baseline: &Baseline) -> f64 {
+    let by_sid = group_records_by_sid(&a.records);
+    if by_sid.is_empty() {
+        return 50.0;
+    }
+    let counts: Vec<f64> = by_sid
+        .values()
+        .map(|recs| {
+            let mut models: HashSet<String> = HashSet::new();
+            for r in recs {
+                if let Some(m) = &r.model {
+                    models.insert(m.clone());
+                }
+            }
+            models.len() as f64
+        })
+        .collect();
+    let cur = median(&counts);
+    let z = robust_z(cur, baseline.session_models_med, baseline.session_models_mad);
+    logistic_score(z, 1.5)
+}
+
+/// Acceleration: do gaps between requests within sessions trend up (slowing
+/// down / focus drift) or down (speeding up / panic mode)? Score uses |z|
+/// because either direction is a regime change worth flagging.
+fn driver_acceleration(a: &Aggregate) -> f64 {
+    let by_sid = group_records_by_sid(&a.records);
+    let slopes: Vec<f64> = by_sid
+        .values()
+        .filter(|recs| recs.len() >= 4)
+        .map(|recs| {
+            let mut sorted = recs.clone();
+            sorted.sort_by(|a, b| {
+                a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let gaps: Vec<f64> =
+                sorted.windows(2).map(|w| w[1].ts - w[0].ts).collect();
+            let pairs: Vec<(f64, f64)> = gaps
+                .iter()
+                .enumerate()
+                .map(|(i, g)| (i as f64, *g))
+                .collect();
+            slope(&pairs)
+        })
+        .collect();
+    if slopes.is_empty() {
+        return 50.0;
+    }
+    let cur = median(&slopes);
+    let dispersion = mad(&slopes, cur).max(0.5);
+    let z = robust_z(cur, 0.0, dispersion).abs();
+    logistic_score(z, 1.5)
+}
+
+pub fn driver_score(a: &Aggregate, baseline: &Baseline) -> u32 {
+    if a.n == 0 || baseline.n_records == 0 {
         return 0;
     }
-    let s = driver_bloat(a) + driver_rapidfire(a) + driver_burst(a) + driver_sprawl(a);
-    s.min(100.0) as u32
+    let sprawl = driver_sprawl(a, baseline);
+    let pace = driver_pace(a, baseline);
+    let bloat = driver_bloat(a, baseline);
+    let thrash = driver_thrash(a, baseline);
+    let accel = driver_acceleration(a);
+    let composite =
+        sprawl * 0.25 + pace * 0.20 + bloat * 0.25 + thrash * 0.15 + accel * 0.15;
+    composite.round().clamp(0.0, 100.0) as u32
 }
 
-// ─── Bot-side (L·L·V·V) ──────────────────────────────────────────────────────
+// ─── Bot-side (output-health-focused) ────────────────────────────────────────
+//
+// Bot score measures the QUALITY/HEALTH of the bot's outputs and its
+// streaming behavior, NOT the upstream API's tail latency. Four components:
+//
+//   brevity    — median output tokens vs typical (low = bot bailing)
+//   stalling   — ms per output token vs typical (high = streaming choke)
+//   wandering  — within-session output variance vs typical (high = unstable)
+//   cache_drag — cache miss rate vs typical (high = no cache benefit)
 
-fn bot_choke(a: &Aggregate) -> f64 {
-    let pairs: Vec<(f64, f64)> = a
+fn bot_brevity(a: &Aggregate, baseline: &Baseline) -> f64 {
+    if a.records.is_empty() {
+        return 50.0;
+    }
+    let outs: Vec<f64> = a.records.iter().map(|r| r.out as f64).collect();
+    let cur = median(&outs);
+    // Concerning when current is BELOW baseline → swap sign of diff.
+    let z = robust_z(baseline.out_med - cur, 0.0, baseline.out_mad);
+    logistic_score(z, 1.5)
+}
+
+fn bot_stalling(a: &Aggregate, baseline: &Baseline) -> f64 {
+    let ms_per_token: Vec<f64> = a
         .records
         .iter()
-        .map(|r| (r.r#in as f64, r.lat as f64))
+        .filter(|r| r.out > 0)
+        .map(|r| r.lat as f64 / r.out as f64)
         .collect();
-    let s = slope(&pairs);
-    ((s - 1.0) * 7.5).clamp(0.0, 30.0)
+    if ms_per_token.is_empty() {
+        return 50.0;
+    }
+    let cur = median(&ms_per_token);
+    // Concerning when current is ABOVE baseline.
+    let z = robust_z(cur, baseline.ms_per_token_med, baseline.ms_per_token_mad);
+    logistic_score(z, 1.5)
 }
 
-fn bot_spike(a: &Aggregate) -> f64 {
-    if a.lats.is_empty() {
-        return 0.0;
+fn bot_wandering(a: &Aggregate, baseline: &Baseline) -> f64 {
+    let by_sid = group_records_by_sid(&a.records);
+    let cvs: Vec<f64> = by_sid
+        .values()
+        .filter(|recs| recs.len() >= 3)
+        .map(|recs| {
+            let outs: Vec<f64> = recs.iter().map(|r| r.out as f64).collect();
+            cv(&outs)
+        })
+        .collect();
+    if cvs.is_empty() {
+        return 50.0;
     }
-    let mut lats: Vec<f64> = a.lats.iter().map(|x| *x as f64).collect();
-    let p50 = quantile(&mut lats.clone(), 0.5);
-    let p99 = quantile(&mut lats, 0.99);
-    if p50 <= 0.0 {
-        return 0.0;
-    }
-    let ratio = p99 / p50;
-    ((ratio - 5.0) * 1.7).clamp(0.0, 25.0)
+    let cur = median(&cvs);
+    let z = robust_z(cur, baseline.session_out_cv_med, baseline.session_out_cv_mad);
+    logistic_score(z, 1.5)
 }
 
-fn bot_collapse(a: &Aggregate) -> f64 {
-    let avg_out = if a.n > 0 { a.out as f64 / a.n as f64 } else { 0.0 };
-    if avg_out >= 200.0 {
-        0.0
-    } else {
-        ((200.0 - avg_out) / 8.0).min(25.0)
+fn bot_cache_drag(a: &Aggregate, baseline: &Baseline) -> f64 {
+    let total_cr: u64 = a.records.iter().map(|r| r.cr).sum();
+    let total_cc: u64 = a.records.iter().map(|r| r.cc).sum();
+    if total_cr + total_cc == 0 {
+        return 50.0;
     }
+    let cur = total_cc as f64 / (total_cr + total_cc) as f64;
+    let synth_mad = (baseline.cache_miss_rate * 0.3).max(0.05);
+    let z = robust_z(cur, baseline.cache_miss_rate, synth_mad);
+    logistic_score(z, 1.5)
 }
 
-fn bot_hedge(a: &Aggregate) -> f64 {
-    let ratio = if a.r#in > 0 {
-        a.out as f64 / a.r#in as f64
-    } else {
-        0.0
-    };
-    if ratio >= 0.15 {
-        0.0
-    } else {
-        ((0.15 - ratio) / 0.0075).min(20.0)
-    }
-}
-
-pub fn bot_score(a: &Aggregate) -> u32 {
-    if a.n == 0 {
+pub fn bot_score(a: &Aggregate, baseline: &Baseline) -> u32 {
+    if a.n == 0 || baseline.n_records == 0 {
         return 0;
     }
-    let s = bot_choke(a) + bot_spike(a) + bot_collapse(a) + bot_hedge(a);
-    s.min(100.0) as u32
+    let brevity = bot_brevity(a, baseline);
+    let stalling = bot_stalling(a, baseline);
+    let wandering = bot_wandering(a, baseline);
+    let cache_drag = bot_cache_drag(a, baseline);
+    let composite =
+        brevity * 0.35 + stalling * 0.25 + wandering * 0.25 + cache_drag * 0.15;
+    composite.round().clamp(0.0, 100.0) as u32
 }
 
 // ─── Labels ──────────────────────────────────────────────────────────────────

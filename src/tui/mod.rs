@@ -14,7 +14,7 @@ mod chrome;
 mod panels;
 mod style;
 
-use crate::brainrot::aggregate::Aggregate;
+use crate::brainrot::aggregate::{Aggregate, Baseline};
 use crate::config::Config;
 use crate::ledger_read::{iter_records, parse_range, Range};
 use crossterm::event::{
@@ -81,6 +81,7 @@ pub struct App {
     pub range_preset: RangePreset,
     pub range: Range,
     pub agg: Aggregate,
+    pub baseline: Baseline,
     pub overlay: Overlay,
     pub started: Instant,
     pub last_refresh: Instant,
@@ -97,11 +98,15 @@ impl App {
             label: "today".into(),
         });
         let agg = Aggregate::ingest(iter_records(Some(range.since), Some(range.until)));
+        // Baseline: full ledger, used for self-normalized z-scoring.
+        let baseline_records: Vec<_> = iter_records(None, None).collect();
+        let baseline = Baseline::from_records(&baseline_records);
         Self {
             cfg,
             range_preset: preset,
             range,
             agg,
+            baseline,
             overlay: Overlay::None,
             started: Instant::now(),
             last_refresh: Instant::now(),
@@ -113,6 +118,11 @@ impl App {
         let r = parse_range(self.range_preset.spec()).unwrap_or_else(|_| self.range.clone());
         self.range = r;
         self.agg = Aggregate::ingest(iter_records(Some(self.range.since), Some(self.range.until)));
+        // Refresh baseline on every tick — the ledger may have grown since
+        // last refresh and the baseline should always reflect the full
+        // current history. Cheap on disk reads.
+        let baseline_records: Vec<_> = iter_records(None, None).collect();
+        self.baseline = Baseline::from_records(&baseline_records);
 
         // For "all", snap the range start to the first actual record timestamp
         // so the x-axis doesn't span 1970-to-now uselessly. If there are no

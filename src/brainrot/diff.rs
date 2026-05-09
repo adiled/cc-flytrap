@@ -13,6 +13,8 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let rb = parse_range(&sb).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let a = Aggregate::ingest(iter_records(Some(ra.since), Some(ra.until)));
     let b = Aggregate::ingest(iter_records(Some(rb.since), Some(rb.until)));
+    let baseline_records: Vec<_> = iter_records(None, None).collect();
+    let baseline = Baseline::from_records(&baseline_records);
 
     header("brainrot diff", &format!("{}  vs  {}", ra.label, rb.label));
 
@@ -22,10 +24,10 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let bot_a = bot_score(&a) as i64;
-    let bot_b = bot_score(&b) as i64;
-    let drv_a = driver_score(&a) as i64;
-    let drv_b = driver_score(&b) as i64;
+    let bot_a = bot_score(&a, &baseline) as i64;
+    let bot_b = bot_score(&b, &baseline) as i64;
+    let drv_a = driver_score(&a, &baseline) as i64;
+    let drv_b = driver_score(&b, &baseline) as i64;
     let avg_lat_a = if a.n > 0 { a.lat_sum as f64 / a.n as f64 } else { 0.0 };
     let avg_lat_b = if b.n > 0 { b.lat_sum as f64 / b.n as f64 } else { 0.0 };
     let avg_in_a = if a.n > 0 { a.r#in as f64 / a.n as f64 } else { 0.0 };

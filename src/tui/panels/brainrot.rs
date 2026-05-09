@@ -135,8 +135,8 @@ fn chart(f: &mut Frame, area: Rect, app: &App) {
         }
         let mid_ts = app.range.since + bucket_s * (i as f64 + 0.5);
         let bucket_agg = Aggregate::ingest(bucket);
-        bot_pts.push((mid_ts, bot_score(&bucket_agg) as f64));
-        drv_pts.push((mid_ts, driver_score(&bucket_agg) as f64));
+        bot_pts.push((mid_ts, bot_score(&bucket_agg, &app.baseline) as f64));
+        drv_pts.push((mid_ts, driver_score(&bucket_agg, &app.baseline) as f64));
     }
 
     let datasets = vec![

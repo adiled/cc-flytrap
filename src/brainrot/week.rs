@@ -22,10 +22,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let a = Aggregate::ingest(records.iter().cloned());
+    let baseline_records: Vec<_> = iter_records(None, None).collect();
+    let baseline = Baseline::from_records(&baseline_records);
 
     // Scores
-    let bot = bot_score(&a);
-    let drv = driver_score(&a);
+    let bot = bot_score(&a, &baseline);
+    let drv = driver_score(&a, &baseline);
     section("vibe");
     println!(
         "    {}     {} / 100   {} {}",

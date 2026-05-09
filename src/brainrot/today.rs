@@ -11,6 +11,8 @@ use crate::theme::*;
 pub fn run(spec: &str) -> Result<(), Box<dyn std::error::Error>> {
     let range = parse_range(spec).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let a = Aggregate::ingest(iter_records(Some(range.since), Some(range.until)));
+    let baseline_records: Vec<_> = iter_records(None, None).collect();
+    let baseline = Baseline::from_records(&baseline_records);
     let cov = compute_coverage(&load_state_events(), range.since, range.until);
 
     header("brainrot", &range.label);
@@ -20,7 +22,7 @@ pub fn run(spec: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    scores_view(&a, &cov);
+    scores_view(&a, &baseline, &cov);
     summary_view(&a);
     burn_view(&a);
     by_hour_view(&a);
@@ -52,9 +54,9 @@ fn empty_view(cov: &Coverage) {
     println!();
 }
 
-fn scores_view(a: &Aggregate, cov: &Coverage) {
-    let bot = bot_score(a);
-    let drv = driver_score(a);
+fn scores_view(a: &Aggregate, baseline: &Baseline, cov: &Coverage) {
+    let bot = bot_score(a, baseline);
+    let drv = driver_score(a, baseline);
     section("vibe");
     println!(
         "    {}     {} / 100   {} {}",
