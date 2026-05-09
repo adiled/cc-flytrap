@@ -119,22 +119,37 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     let new_total: usize = new_rows_by_session.values().map(|v| v.len()).sum();
 
+    // SAFETY: never drop a session that has no replacement turns. A session
+    // can have ledger rows but an empty/title-only JSONL (e.g. cancelled
+    // sessions, sessions captured by ccft from non-Claude-Code clients).
+    // Without this guard, --since covering such a session destroys real
+    // data with nothing to replace it. Restrict the drop set to sessions
+    // we actually have replacement data for.
+    let drop_set: HashSet<String> = new_rows_by_session.keys().cloned().collect();
+    let preserved_no_jsonl: HashSet<String> = affected.difference(&drop_set).cloned().collect();
+
     let lpath = ledger_path();
     let raw_existing = read_raw_lines(&lpath)?;
     let to_drop: usize = raw_existing
         .iter()
         .filter(|line| {
             sid_of_raw(line)
-                .map(|s| affected.contains(&s))
+                .map(|s| drop_set.contains(&s))
                 .unwrap_or(false)
         })
         .count();
 
     println!();
     println!("plan:");
-    println!("  drop  {} existing ledger rows from {} affected sessions", to_drop, affected.len());
+    println!("  drop  {} existing ledger rows from {} sessions with replacement data", to_drop, drop_set.len());
     println!("  write {} fresh rows from JSONL", new_total);
     println!("  preserve {} unrelated rows untouched", raw_existing.len() - to_drop);
+    if !preserved_no_jsonl.is_empty() {
+        println!(
+            "  skip   {} affected sessions whose JSONL has no paired turns (rows kept as-is)",
+            preserved_no_jsonl.len()
+        );
+    }
 
     if args.dry_run {
         println!();
@@ -159,7 +174,7 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut out_lines: Vec<String> = Vec::with_capacity(raw_existing.len() - to_drop + new_total);
     for raw in raw_existing {
         let drop = sid_of_raw(&raw)
-            .map(|s| affected.contains(&s))
+            .map(|s| drop_set.contains(&s))
             .unwrap_or(false);
         if !drop {
             out_lines.push(raw);
