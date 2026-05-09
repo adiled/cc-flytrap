@@ -132,11 +132,45 @@ fn range_chips(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(Line::from(spans)), row[1]);
 }
 
+/// Maximum number of empty bucket-widths between two data points before we
+/// treat them as belonging to separate "runs" and break the line. With
+/// `GraphType::Line`, ratatui blindly draws a straight segment between
+/// consecutive points in a dataset regardless of their x-distance, which
+/// is misleading when the user wasn't active for days/weeks. A gap larger
+/// than this threshold ends the current run and starts a fresh one — the
+/// chart shows a real visual gap instead of a phantom diagonal.
+///
+/// Same convention as financial charts: no trades on weekends → no line.
+const GAP_BREAK_BUCKETS: f64 = 2.5;
+
+/// Split a chronologically-sorted point series into contiguous runs at
+/// gaps larger than `max_gap` seconds. Each run becomes its own ratatui
+/// Dataset, so the line breaks visually at the gap.
+fn split_at_gaps(pts: &[(f64, f64)], max_gap: f64) -> Vec<Vec<(f64, f64)>> {
+    let mut runs: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut current: Vec<(f64, f64)> = Vec::new();
+    let mut last_x: Option<f64> = None;
+    for &p in pts {
+        if let Some(lx) = last_x {
+            if p.0 - lx > max_gap && !current.is_empty() {
+                runs.push(std::mem::take(&mut current));
+            }
+        }
+        current.push(p);
+        last_x = Some(p.0);
+    }
+    if !current.is_empty() {
+        runs.push(current);
+    }
+    runs
+}
+
 fn chart(f: &mut Frame, area: Rect, app: &App) {
     let bucket_count = ((area.width as usize).saturating_sub(8)).max(20);
     let (since, until) = effective_range(app);
     let span = (until - since).max(1.0);
     let bucket_s = span / bucket_count as f64;
+    let max_gap = bucket_s * GAP_BREAK_BUCKETS;
 
     let mut by_bucket: Vec<Vec<Record>> = (0..bucket_count).map(|_| Vec::new()).collect();
     for r in &app.agg.records {
@@ -166,20 +200,32 @@ fn chart(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    let mut datasets = vec![Dataset::default()
-        .name("bot")
-        .marker(symbols::Marker::Braille)
-        .graph_type(GraphType::Line)
-        .style(Style::default().fg(style::PINK))
-        .data(&bot_pts)];
-    if !driver_bootstrapping {
+    // Split each series into runs at significant gaps so the line doesn't
+    // bridge over empty calendar periods (April 15 → April 30 with no
+    // activity should NOT draw a diagonal line, matching how every
+    // sane time-series charting tool behaves).
+    let bot_runs = split_at_gaps(&bot_pts, max_gap);
+    let drv_runs = if driver_bootstrapping { Vec::new() } else { split_at_gaps(&drv_pts, max_gap) };
+
+    let mut datasets: Vec<Dataset> = Vec::new();
+    for run in &bot_runs {
+        datasets.push(
+            Dataset::default()
+                .name("bot")
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(style::PINK))
+                .data(run),
+        );
+    }
+    for run in &drv_runs {
         datasets.push(
             Dataset::default()
                 .name("driver")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(style::CYAN))
-                .data(&drv_pts),
+                .data(run),
         );
     }
 
