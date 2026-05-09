@@ -235,18 +235,17 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(spans));
     }
 
-    // Cluster into the upper-left of the panel. Paragraph doesn't wrap;
-    // we constrain to ~3/5 panel width so the lower-right stays empty
-    // even when content could expand. The emptiness is the point.
+    // Cluster into the upper-left of the panel. Text gets the full panel
+    // width so long lines (split summary, peaks with heat-colored lat,
+    // models row) aren't silently truncated. The lower-right negative
+    // space comes from height — we only use as many rows as there are
+    // lines, leaving everything below empty.
     let line_count = lines.len() as u16;
     let text_h = (line_count + 1).min(inner.height);
-    let text_w = (inner.width.saturating_mul(3) / 5)
-        .max(40)
-        .min(inner.width);
     let text_area = Rect {
         x: inner.x,
         y: inner.y,
-        width: text_w,
+        width: inner.width,
         height: text_h,
     };
 
