@@ -1,6 +1,6 @@
 //! ccft - an agentic self improvement tool.
 //!
-//! Single-binary streaming MITM proxy on top of hudsucker. Listens between
+//! Single-binary streaming flytrap proxy on top of hudsucker. Listens between
 //! Claude Code and api.anthropic.com, mutates the request system prompt
 //! per ~/.config/ccft/ccft.json, and writes a per-response token ledger
 //! while preserving the upstream stream byte-for-byte to the client.

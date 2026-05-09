@@ -134,7 +134,26 @@ fn mutate_messages_body(body_bytes: &[u8], cfg: &Config) -> Option<Bytes> {
     Some(Bytes::from(new_body))
 }
 
+/// Hosts whose CONNECT requests we flytrap (intercept + decrypt). Today
+/// we only have mutation/ledger logic for Anthropic's /v1/messages, so
+/// flytrapping anything else gains nothing while costing TLS failures
+/// for subprocesses that don't trust ccft's CA. Add hosts here as we add
+/// per-provider handler support.
+const FLYTRAP_HOSTS: &[&str] = &["api.anthropic.com"];
+
+fn should_flytrap_host(host: &str) -> bool {
+    FLYTRAP_HOSTS.contains(&host)
+}
+
 impl HttpHandler for CcftHandler {
+    async fn should_intercept(
+        &mut self,
+        _ctx: &HttpContext,
+        req: &Request<Body>,
+    ) -> bool {
+        should_flytrap_host(req.uri().host().unwrap_or(""))
+    }
+
     async fn handle_request(
         &mut self,
         ctx: &HttpContext,

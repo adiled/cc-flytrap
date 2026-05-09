@@ -16,7 +16,7 @@ pub enum State {
     LaunchdRunning { pid: u32 },
     /// launchd registered but not currently running.
     LaunchdIdle,
-    /// Something else is bound to our port (manual mitmdump, foreign proxy).
+    /// Something else is bound to our port (foreign proxy or stale process).
     PortBoundForeign,
     /// Not installed at all.
     NotInstalled,
