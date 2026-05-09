@@ -188,11 +188,17 @@ fn chart(f: &mut Frame, area: Rect, app: &App) {
 
     let mut bot_pts: Vec<(f64, f64)> = Vec::new();
     let mut drv_pts: Vec<(f64, f64)> = Vec::new();
+    let mut gap_pts: Vec<(f64, f64)> = Vec::new();
     for (i, bucket) in by_bucket.into_iter().enumerate() {
+        let mid_ts = since + bucket_s * (i as f64 + 0.5);
         if bucket.len() < MIN_BUCKET_N {
+            // Empty (or noise-floor) bucket — record a white "no activity"
+            // dot at y=0 so the gap is visible as a continuous tick row
+            // along the bottom rather than an empty void. No interpolation
+            // implied since these dots aren't part of the bot/driver line.
+            gap_pts.push((mid_ts, 0.0));
             continue;
         }
-        let mid_ts = since + bucket_s * (i as f64 + 0.5);
         let bucket_agg = Aggregate::ingest(bucket);
         bot_pts.push((mid_ts, bot_score(&bucket_agg, &app.baseline) as f64));
         if !driver_bootstrapping {
@@ -200,14 +206,25 @@ fn chart(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // Split each series into runs at significant gaps so the line doesn't
-    // bridge over empty calendar periods (April 15 → April 30 with no
-    // activity should NOT draw a diagonal line, matching how every
-    // sane time-series charting tool behaves).
+    // Split each line series into runs at significant gaps so it doesn't
+    // bridge over empty calendar periods. The gap_pts dots then occupy
+    // those gaps visually.
     let bot_runs = split_at_gaps(&bot_pts, max_gap);
     let drv_runs = if driver_bootstrapping { Vec::new() } else { split_at_gaps(&drv_pts, max_gap) };
 
     let mut datasets: Vec<Dataset> = Vec::new();
+    // Gap dots first so the colored metric lines paint on top wherever
+    // they overlap (lines win over dots at the same cell).
+    if !gap_pts.is_empty() {
+        datasets.push(
+            Dataset::default()
+                .name("gap")
+                .marker(symbols::Marker::Dot)
+                .graph_type(GraphType::Scatter)
+                .style(Style::default().fg(style::WHITE))
+                .data(&gap_pts),
+        );
+    }
     for run in &bot_runs {
         datasets.push(
             Dataset::default()
