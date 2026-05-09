@@ -9,13 +9,21 @@ use crate::tui::{App, Overlay};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 use std::collections::HashMap;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let popup = centered(area, 80, 70);
+    // Clear strips any text under the popup. Then a solid BG fill so the
+    // overlay reads as its own opaque surface — without it the substrate
+    // color of cells under the overlay leaks through and the popup looks
+    // see-through.
     f.render_widget(Clear, popup);
+    f.render_widget(
+        Block::default().style(Style::default().bg(style::BG)),
+        popup,
+    );
 
     let title = match app.overlay {
         Overlay::Sessions => "sessions",
