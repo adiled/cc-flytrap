@@ -337,8 +337,8 @@ fn body(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
         .spacing(1)
         .constraints([
             Constraint::Percentage(45),
-            Constraint::Percentage(22),
-            Constraint::Percentage(33),
+            Constraint::Percentage(18),
+            Constraint::Percentage(37),
         ])
         .split(cols[1]);
 
