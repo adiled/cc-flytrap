@@ -95,15 +95,26 @@ fn build_buckets(app: &App) -> Vec<Bucket> {
         crate::tui::RangePreset::Today | crate::tui::RangePreset::Yesterday => {
             build_hod_buckets_2h(app, local)
         }
-        // Rolling 24-hour window: 12 chronological 2h rows ending at the
-        // current 2h-aligned wall-clock boundary. Last bar = current 2h slot.
-        crate::tui::RangePreset::H24 => build_rolling_24h_buckets(app, local),
-        // Rolling 7-day window: 7 calendar-day rows ending today.
-        crate::tui::RangePreset::Week => build_rolling_7d_buckets(app, local),
+        // Rolling sub-day windows + rolling 24h: hour-of-day style buckets
+        // ending at the current wall-clock boundary. The 24h builder
+        // produces 12 × 2h rows; for tighter windows it'll just show fewer
+        // populated rows, which is fine.
+        crate::tui::RangePreset::H1
+        | crate::tui::RangePreset::H2
+        | crate::tui::RangePreset::H4
+        | crate::tui::RangePreset::H6
+        | crate::tui::RangePreset::H12
+        | crate::tui::RangePreset::H24 => build_rolling_24h_buckets(app, local),
+        // Multi-day rolling windows: per-day rows, like the 7d builder.
+        crate::tui::RangePreset::D3 | crate::tui::RangePreset::Week => {
+            build_rolling_7d_buckets(app, local)
+        }
         // This calendar week: 7 fixed Mon..Sun rows with future days empty.
         crate::tui::RangePreset::ThisWeek => build_this_week_buckets(app, local),
-        // All time: adaptive based on actual data span.
-        crate::tui::RangePreset::All => build_all_buckets(app, local),
+        // Multi-week / month / all: adaptive based on actual data span.
+        crate::tui::RangePreset::W2
+        | crate::tui::RangePreset::Mo1
+        | crate::tui::RangePreset::All => build_all_buckets(app, local),
     }
 }
 

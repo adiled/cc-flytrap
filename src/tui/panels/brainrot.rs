@@ -94,9 +94,17 @@ fn range_chips(f: &mut Frame, area: Rect, app: &App) {
     let presets: &[(RangePreset, &str)] = &[
         (RangePreset::Today, "today"),
         (RangePreset::Yesterday, "yday"),
-        (RangePreset::H24, "24h"),
+        (RangePreset::H1, "1h"),
+        (RangePreset::H2, "2h"),
+        (RangePreset::H4, "4h"),
+        (RangePreset::H6, "6h"),
+        (RangePreset::H12, "12h"),
+        (RangePreset::H24, "1d"),
+        (RangePreset::D3, "3d"),
         (RangePreset::Week, "7d"),
         (RangePreset::ThisWeek, "wk"),
+        (RangePreset::W2, "2w"),
+        (RangePreset::Mo1, "1mo"),
         (RangePreset::All, "all"),
     ];
 

@@ -35,42 +35,64 @@ pub enum Overlay {
 pub(crate) enum RangePreset {
     Today,
     Yesterday,
-    H24,
-    Week,
+    H1,
+    H2,
+    H4,
+    H6,
+    H12,
+    H24, // = 1d, label "1d"
+    D3,
+    Week, // = 7d
     ThisWeek,
+    W2,
+    Mo1,
     All,
 }
 
 impl RangePreset {
+    /// Linear order for cycling — granularity ascending.
+    const ORDER: &'static [RangePreset] = &[
+        RangePreset::Today,
+        RangePreset::Yesterday,
+        RangePreset::H1,
+        RangePreset::H2,
+        RangePreset::H4,
+        RangePreset::H6,
+        RangePreset::H12,
+        RangePreset::H24,
+        RangePreset::D3,
+        RangePreset::Week,
+        RangePreset::ThisWeek,
+        RangePreset::W2,
+        RangePreset::Mo1,
+        RangePreset::All,
+    ];
+
     fn cycle_next(self) -> Self {
-        use RangePreset::*;
-        match self {
-            Today => Yesterday,
-            Yesterday => H24,
-            H24 => Week,
-            Week => ThisWeek,
-            ThisWeek => All,
-            All => Today,
-        }
+        let i = Self::ORDER.iter().position(|p| *p == self).unwrap_or(0);
+        Self::ORDER[(i + 1) % Self::ORDER.len()]
     }
+
     fn cycle_prev(self) -> Self {
-        use RangePreset::*;
-        match self {
-            Today => All,
-            Yesterday => Today,
-            H24 => Yesterday,
-            Week => H24,
-            ThisWeek => Week,
-            All => ThisWeek,
-        }
+        let i = Self::ORDER.iter().position(|p| *p == self).unwrap_or(0);
+        Self::ORDER[(i + Self::ORDER.len() - 1) % Self::ORDER.len()]
     }
+
     fn spec(self) -> &'static str {
         match self {
             RangePreset::Today => "today",
             RangePreset::Yesterday => "yesterday",
+            RangePreset::H1 => "1h",
+            RangePreset::H2 => "2h",
+            RangePreset::H4 => "4h",
+            RangePreset::H6 => "6h",
+            RangePreset::H12 => "12h",
             RangePreset::H24 => "24h",
+            RangePreset::D3 => "3d",
             RangePreset::Week => "7d",
             RangePreset::ThisWeek => "this-week",
+            RangePreset::W2 => "2w",
+            RangePreset::Mo1 => "1mo",
             RangePreset::All => "all",
         }
     }

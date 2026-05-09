@@ -301,6 +301,18 @@ pub fn parse_range(spec: &str) -> Result<Range, String> {
             return Ok(Range { since: now - n as f64 * 86400.0, until: now, label: format!("last {}d", n) });
         }
     }
+    if let Some(stripped) = s.strip_suffix('w') {
+        if let Ok(n) = stripped.parse::<u64>() {
+            return Ok(Range { since: now - n as f64 * 7.0 * 86400.0, until: now, label: format!("last {}w", n) });
+        }
+    }
+    // Months (approximate: 30 days per month). Try the longer suffix first
+    // so "1mo" doesn't get stripped as "1m" + leftover "o".
+    if let Some(stripped) = s.strip_suffix("mo") {
+        if let Ok(n) = stripped.parse::<u64>() {
+            return Ok(Range { since: now - n as f64 * 30.0 * 86400.0, until: now, label: format!("last {}mo", n) });
+        }
+    }
     // YYYY-MM-DD: a single calendar day in local time.
     if s.len() == 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' {
         let fmt = time::format_description::parse("[year]-[month]-[day]")
