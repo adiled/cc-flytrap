@@ -368,40 +368,42 @@ impl Baseline {
         let span_hours = ((last_ts - first_ts) / 3600.0).max(1.0 / 60.0);
         let sessions_per_hour = n_sessions as f64 / span_hours;
 
-        // Driver kinetics: per-record chars/min slot. Each record represents
-        // one API request, which packages a single human turn (or zero
-        // chars when it's a tool-loop continuation). The "minute" denominator
-        // is the time gap from the previous record in the same session,
-        // floored at 1s so a burst doesn't divide by zero. We keep only
-        // records where u_ch > 0 — that filters out historical records
-        // (pre-schema-bump) AND tool-loop continuations.
-        let mut u_chars_per_min: Vec<f64> = Vec::new();
-        let mut n_records_with_u_ch = 0u64;
-        let by_sid_for_uch = group_records_by_sid_basic(records);
-        for (_sid, mut idxs) in by_sid_for_uch {
-            idxs.sort_by(|a, b| {
-                records[*a]
-                    .ts
-                    .partial_cmp(&records[*b].ts)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let mut prev_ts: Option<f64> = None;
-            for i in idxs {
-                let r = &records[i];
-                if r.u_ch > 0 {
-                    n_records_with_u_ch += 1;
-                    let gap_s = match prev_ts {
-                        Some(p) => (r.ts - p).max(1.0),
-                        None => 60.0, // first turn of a session: assume ~1min
-                    };
-                    let chars_per_min = r.u_ch as f64 / (gap_s / 60.0);
-                    u_chars_per_min.push(chars_per_min);
-                }
-                prev_ts = Some(r.ts);
-            }
+        // Driver kinetics: per-day sustained rate. Group records by local
+        // date, compute each day's total u_ch / active_minutes_that_day
+        // (active span = first-to-last record on that date). Take median +
+        // MAD across days. This matches the per-window driver_chars_per_min
+        // metric below, so the score's z-test compares apples-to-apples.
+        //
+        // Earlier attempt computed per-record bursts (a 500-char message
+        // after a 30s gap = 1000 chars/min); MAD across those was ~170,
+        // dwarfing any real day-to-day variation. Per-day rates land in a
+        // 50-200 chars/min band → MAD ~30-50 → z values actually move.
+        let local_offset = time::UtcOffset::current_local_offset()
+            .unwrap_or(time::UtcOffset::UTC);
+        let mut by_date: HashMap<(i32, u8, u8), Vec<&Record>> = HashMap::new();
+        for r in records {
+            if r.u_ch == 0 { continue; }
+            let dt = time::OffsetDateTime::from_unix_timestamp(r.ts as i64)
+                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+                .to_offset(local_offset);
+            by_date
+                .entry((dt.year(), u8::from(dt.month()), dt.day()))
+                .or_default()
+                .push(r);
         }
-        let user_chars_per_min_med = median(&u_chars_per_min);
-        let user_chars_per_min_mad = mad(&u_chars_per_min, user_chars_per_min_med);
+        let mut daily_rates: Vec<f64> = Vec::new();
+        let mut n_records_with_u_ch = 0u64;
+        for (_date, recs) in &by_date {
+            n_records_with_u_ch += recs.len() as u64;
+            if recs.len() < 2 { continue; }
+            let first = recs.iter().map(|r| r.ts).fold(f64::INFINITY, f64::min);
+            let last = recs.iter().map(|r| r.ts).fold(f64::NEG_INFINITY, f64::max);
+            let span_min = ((last - first) / 60.0).max(1.0);
+            let total_u_ch: u64 = recs.iter().map(|r| r.u_ch).sum();
+            daily_rates.push(total_u_ch as f64 / span_min);
+        }
+        let user_chars_per_min_med = median(&daily_rates);
+        let user_chars_per_min_mad = mad(&daily_rates, user_chars_per_min_med);
 
         // Latency-tier percentiles (lat in ms across all records)
         let mut lats: Vec<f64> = records.iter().map(|r| r.lat as f64).collect();
@@ -449,7 +451,9 @@ fn group_records_by_sid(records: &[Record]) -> HashMap<String, Vec<Record>> {
 }
 
 /// Index-only group-by-sid (avoids cloning Records when the caller only
-/// needs to walk indices into the original slice).
+/// needs to walk indices into the original slice). Currently unused after
+/// the per-day baseline switch but kept as a utility.
+#[allow(dead_code)]
 fn group_records_by_sid_basic(records: &[Record]) -> HashMap<String, Vec<usize>> {
     let mut m: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, r) in records.iter().enumerate() {
