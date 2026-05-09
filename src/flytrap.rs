@@ -1,4 +1,4 @@
-//! Proxy lifecycle: load CA, build hudsucker proxy, run until shutdown signal.
+//! Flytrap lifecycle: load CA, configure hudsucker, run until shutdown signal.
 
 use crate::config::{paths, Config};
 use crate::handler::{record_state_on_startup, CcftHandler};
@@ -32,7 +32,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     let cfg = Arc::new(cfg);
     let handler = CcftHandler::new(Arc::clone(&cfg));
 
-    let proxy = Proxy::builder()
+    let flytrap = Proxy::builder()
         .with_addr(addr)
         .with_ca(ca)
         .with_rustls_connector(aws_lc_rs::default_provider())
@@ -44,7 +44,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build()?;
 
-    proxy.start().await?;
+    flytrap.start().await?;
     Ok(())
 }
 

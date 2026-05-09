@@ -62,8 +62,8 @@ The TUI brainrot panel reads this file as-is.
 
 | Command | What |
 |---|---|
-| `ccft run` | Run proxy in foreground using production config (what launchd invokes) |
-| `ccft dev` | Run proxy in foreground using dev config (port 7179, isolated ledger) |
+| `ccft run` | Run flytrap in foreground using production config (what launchd invokes) |
+| `ccft dev` | Run flytrap in foreground using dev config (port 7179, isolated ledger) |
 | `ccft install` | Copy binary, generate CA, write plist, bootstrap launchd |
 | `ccft uninstall` | Bootout, remove plist + binary, keep CA/config/ledger |
 | `ccft status` | Print install + load + bind state |

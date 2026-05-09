@@ -1,8 +1,8 @@
 //! Full-screen TUI — the default `ccft` invocation.
 //!
 //! Brainrot is the frame. Everything is one screen with brainrot at the
-//! center. Time-dimension dials live on the keybar; overlays for split,
-//! sessions, perf, live tail dissolve back to the main view on Esc.
+//! center. Time-dimension dials live on the keybar; overlays for sessions
+//! and perf dissolve back to the main view on Esc.
 //!
 //! Architecture:
 //!   - App holds dial state (range, bucket, stride) + cached aggregate.
@@ -317,7 +317,7 @@ fn body(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
         ])
         .split(cols[0]);
 
-    panels::proxy::render(f, left[0], app);
+    panels::system::render(f, left[0], app);
     panels::models::render(f, left[1], app);
     panels::heat::render(f, left[2], app);
 

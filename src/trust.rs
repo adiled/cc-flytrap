@@ -1,12 +1,12 @@
 //! trust — surface the CA cert + the env vars Claude Code needs.
 //!
 //! This used to be auto-applied to ~/.claude.json by the bash installer, which
-//! caused real damage when the proxy went down (claude → connection refused).
+//! caused real damage when the flytrap went down (claude → connection refused).
 //! Default here is print + you decide. `--apply` flag opts in to mutating
 //! ~/.claude.json with a backup.
 
 use crate::config::{paths, Config};
-use crate::proxy;
+use crate::flytrap;
 use serde_json::Value;
 use std::fs;
 
@@ -19,7 +19,7 @@ pub fn ensure_ca() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        proxy::load_or_generate_ca().await?;
+        flytrap::load_or_generate_ca().await?;
         Ok::<_, Box<dyn std::error::Error>>(())
     })?;
     Ok(())
@@ -98,7 +98,7 @@ pub fn revoke() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     fs::write(&claude_json, serde_json::to_string_pretty(&data)? + "\n")?;
-    println!("✓ removed proxy env from {}", claude_json.display());
+    println!("✓ removed flytrap env from {}", claude_json.display());
     Ok(())
 }
 

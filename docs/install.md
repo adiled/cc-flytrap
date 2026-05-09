@@ -20,7 +20,7 @@ ccft trust --apply   # write env into ~/.claude.json (with backup)
 4. Writes `~/Library/LaunchAgents/com.ccft.plist` pointing at the installed binary, with `RunAtLoad` and `KeepAlive`.
 5. `launchctl bootstrap`s the plist into the user domain.
 
-After install, the proxy is running on `127.0.0.1:7178`. To route Claude through it:
+After install, the flytrap is running on `127.0.0.1:7178`. To route Claude through it:
 
 ```bash
 ccft trust --apply   # writes HTTPS_PROXY + NODE_EXTRA_CA_CERTS into ~/.claude.json (with backup)
@@ -62,7 +62,7 @@ make dev                     # builds, then runs `ccft dev` in foreground
 cargo run --release -- dev
 ```
 
-`ccft dev` runs the same proxy in foreground with isolated state:
+`ccft dev` runs the same flytrap in foreground with isolated state:
 
 | | Production (`ccft run`) | Dev (`ccft dev`) |
 |---|---|---|

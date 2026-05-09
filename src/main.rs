@@ -1,6 +1,6 @@
 //! ccft - an agentic self improvement tool.
 //!
-//! Single-binary streaming flytrap proxy on top of hudsucker. Listens between
+//! Single-binary streaming flytrap on top of hudsucker. Listens between
 //! Claude Code and api.anthropic.com, mutates the request system prompt
 //! per ~/.config/ccft/ccft.json, and writes a per-response token ledger
 //! while preserving the upstream stream byte-for-byte to the client.
@@ -13,7 +13,7 @@ mod ledger;
 mod ledger_read;
 mod lifecycle;
 mod perf;
-mod proxy;
+mod flytrap;
 mod session;
 mod sse_tap;
 mod theme;
@@ -34,10 +34,10 @@ struct Cli {
 enum Cmd {
     /// Open the interactive TUI (default when invoked with no args at a tty).
     Tui,
-    /// Run the proxy in the foreground with the production config.
+    /// Run the flytrap in the foreground with the production config.
     /// (This is what launchd invokes after `ccft install`.)
     Run,
-    /// Run the proxy in the foreground with the dev config (port 7179, isolated ledger).
+    /// Run the flytrap in the foreground with the dev config (port 7179, isolated ledger).
     Dev,
     /// Install: copy this binary, generate CA, write launchd plist, bootstrap.
     Install,
@@ -56,7 +56,7 @@ enum Cmd {
         /// Write HTTPS_PROXY + NODE_EXTRA_CA_CERTS into ~/.claude.json (with backup).
         #[arg(long)]
         apply: bool,
-        /// Remove proxy env keys from ~/.claude.json (with backup).
+        /// Remove flytrap env keys from ~/.claude.json (with backup).
         #[arg(long)]
         revoke: bool,
         /// Dump the CA cert PEM to stdout.
@@ -102,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = cli.command.unwrap_or_else(|| {
         // No subcommand: open TUI when stdout is a tty (interactive use).
         // When stdout is NOT a tty (CI, scripts, launchd before the plist
-        // gets updated), fall back to running the proxy. The plist passes
+        // gets updated), fall back to running the flytrap. The plist passes
         // "run" explicitly so launchd never relies on this branch.
         if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
             Cmd::Tui
@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cmd {
         Cmd::Tui => tui::run(),
-        Cmd::Run => run_proxy(Config::load()),
+        Cmd::Run => run_flytrap(Config::load()),
         Cmd::Dev => {
             let mut cfg = Config::load_dev();
             // Force isolated port + ledger if dev.json doesn't override them.
@@ -125,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "CCFT_LEDGER",
                 config::paths::share_dir().join("dev").join("ledger.jsonl"),
             );
-            run_proxy(cfg)
+            run_flytrap(cfg)
         }
         Cmd::Install => install::install(),
         Cmd::Uninstall => install::uninstall(),
@@ -154,11 +154,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn run_proxy(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
+fn run_flytrap(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(proxy::run(cfg))
+    rt.block_on(flytrap::run(cfg))
 }
 
 fn init_tracing() {

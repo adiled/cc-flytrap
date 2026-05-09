@@ -13,9 +13,9 @@ pub fn header(f: &mut Frame, area: Rect, app: &App) {
     let port = app.cfg.port;
     let pid = launchd_pid_from_lsof(port);
     // Uptime now tracks the daemon (ccft run), not the TUI itself.
-    // Falls back to "-" when the proxy isn't running.
+    // Falls back to "-" when the flytrap isn't running.
     let uptime = if pid > 0 {
-        proxy_uptime(pid).unwrap_or_else(|| "-".into())
+        flytrap_uptime(pid).unwrap_or_else(|| "-".into())
     } else {
         "-".into()
     };
@@ -142,10 +142,10 @@ fn fmt_secs(s: u64) -> String {
     }
 }
 
-/// Uptime of the proxy daemon (`ccft run` process) by reading its elapsed
+/// Uptime of the flytrap daemon (`ccft run` process) by reading its elapsed
 /// time from `ps -o etime= -p PID`. ps returns "[[DD-]hh:]mm:ss" — we parse
 /// that into seconds and reformat through `fmt_secs` for consistency.
-fn proxy_uptime(pid: u32) -> Option<String> {
+fn flytrap_uptime(pid: u32) -> Option<String> {
     use std::process::Command;
     if pid == 0 {
         return None;

@@ -12,7 +12,7 @@ claude  ──HTTPS_PROXY=http://127.0.0.1:7178──>  ccft  ──HTTPS h1.1�
                                                                   on stream end, append ledger.jsonl line
 ```
 
-Built on [`hudsucker`](https://github.com/omjadas/hudsucker), a hyper-1.x + tokio + rustls flytrap proxy library. h1.1 is forced (Anthropic accepts it cleanly via ALPN, which sidesteps the open h2 issues across the Go/Rust flytrap ecosystem).
+Built on [`hudsucker`](https://github.com/omjadas/hudsucker), a hyper-1.x + tokio + rustls flytrap library. h1.1 is forced (Anthropic accepts it cleanly via ALPN, which sidesteps the open h2 issues across the Go/Rust flytrap ecosystem).
 
 The flytrap is **scoped to known model-provider hosts** via `should_intercept`. Today that's just `api.anthropic.com`. Every other CONNECT (e.g., `github.com`, `npm registry`, `pypi`) gets a raw passthrough tunnel — ccft never decrypts those bytes, so subprocesses spawned from a Claude session that don't trust ccft's CA don't fail TLS on them.
 
@@ -32,13 +32,13 @@ The flytrap is **scoped to known model-provider hosts** via `should_intercept`. 
 | `Esc` | close overlay |
 | `q` / `Ctrl-C` | quit |
 
-The header **status block** is always-on: port-bound dot, daemon pid, daemon uptime, clock. Proxy health is permanently in the chrome.
+The header **status block** is always-on: port-bound dot, daemon pid, daemon uptime, clock. Flytrap health is permanently in the chrome.
 
 The **range dial** at the bottom is the primary interactivity. Time is the X axis; every panel keeps the same range so drilling preserves context.
 
 ## Sources / dependencies
 
-- [hudsucker](https://github.com/omjadas/hudsucker) — MIT/Apache, hyper-based flytrap proxy library
+- [hudsucker](https://github.com/omjadas/hudsucker) — MIT/Apache, hyper-based flytrap library
 - [rcgen](https://github.com/rustls/rcgen) — CA + cert generation
 - [rustls](https://github.com/rustls/rustls) + `aws-lc-rs` — TLS server side
 - [serde_json](https://github.com/serde-rs/json) — JSON parse + emit for request mutation, ledger, config
@@ -49,4 +49,4 @@ The **range dial** at the bottom is the primary interactivity. Time is the X axi
 
 ## Earlier pilot (lua/)
 
-`lua/` contains a pre-Rust pilot that ran cc-flytrap as a Lua plugin inside the [proxelar](https://github.com/emanuele-em/proxelar) flytrap proxy. It worked for request mutation but proxelar buffers response bodies whenever a script is loaded — the streaming UX collapses to one chunk at end-of-stream. This Rust implementation was the response to that limit.
+`lua/` contains a pre-Rust pilot that ran cc-flytrap as a Lua plugin inside [proxelar](https://github.com/emanuele-em/proxelar) (a Rust HTTPS proxy). It worked for request mutation but proxelar buffers response bodies whenever a script is loaded — the streaming UX collapses to one chunk at end-of-stream. This Rust implementation was the response to that limit.

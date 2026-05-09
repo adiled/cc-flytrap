@@ -1,4 +1,4 @@
-//! PROXY panel — corner-accent chrome, no full border.
+//! SYSTEM panel — corner-accent chrome, no full border.
 
 use crate::tui::style;
 use crate::tui::App;

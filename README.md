@@ -2,7 +2,7 @@
 
 <img width="1412" height="774" alt="ccft TUI" src="https://github.com/user-attachments/assets/f34de8ae-ba83-4326-b7e8-06d03ca1f0bd" />
 
-**ccft — an agentic self improvement tool.** A streaming flytrap proxy that sits between Claude Code and `api.anthropic.com`, mutates the request system prompt to your preferences, and writes a per-response token ledger — all while preserving Claude's token-by-token streaming UX byte-for-byte.
+**ccft — an agentic self improvement tool.** A streaming flytrap that sits between Claude Code and `api.anthropic.com`, mutates the request system prompt to your preferences, and writes a per-response token ledger — all while preserving Claude's token-by-token streaming UX byte-for-byte.
 
 Three design properties:
 
@@ -42,7 +42,7 @@ ccft trust --apply
 
 **Config** — three knobs in `~/.config/ccft/ccft.json`: `system_override` (extra system prompt), `pain` (false trims Claude Code's bloat blocks), `ledger` (write JSONL). See [`docs/reference.md#config`](docs/reference.md#config).
 
-**Architecture** — hudsucker (hyper-1.x + tokio + rustls) flytrap proxy, host-gated to `api.anthropic.com` only. Other CONNECT requests pass straight through, so `gh`, `git`, `npm`, `pip` keep working from any subprocess. See [`docs/architecture.md`](docs/architecture.md).
+**Architecture** — hudsucker (hyper-1.x + tokio + rustls), host-gated to `api.anthropic.com` only. Other CONNECT requests pass straight through, so `gh`, `git`, `npm`, `pip` keep working from any subprocess. See [`docs/architecture.md`](docs/architecture.md).
 
 ## Docs
 
