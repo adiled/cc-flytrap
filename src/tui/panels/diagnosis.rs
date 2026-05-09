@@ -12,11 +12,49 @@ use crate::brainrot::aggregate::{
 use crate::tui::style;
 use crate::tui::App;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use std::collections::HashMap;
+
+/// Bold + a hue. Used for section labels so they read like the CLI's
+/// `▶ section` headers — readable at a glance, hue-coded by content.
+fn section_label(text: &str, hue: ratatui::style::Color) -> Span<'_> {
+    Span::styled(
+        text.to_string(),
+        Style::default().fg(hue).add_modifier(Modifier::BOLD),
+    )
+}
+
+/// White + bold for numerical "headline" values (counts, percentages).
+fn num(text: String) -> Span<'static> {
+    Span::styled(text, Style::default().fg(style::WHITE).add_modifier(Modifier::BOLD))
+}
+
+/// Cyan for general data values that aren't headline numbers (durations,
+/// less prominent metrics).
+fn data(text: String) -> Span<'static> {
+    Span::styled(text, Style::default().fg(style::CYAN))
+}
+
+/// Subtle italic for advisory / commentary text.
+fn note(text: String) -> Span<'static> {
+    Span::styled(
+        text,
+        Style::default().fg(style::SUBTLE).add_modifier(Modifier::ITALIC),
+    )
+}
+
+/// Dim grey separator " · ".
+fn sep() -> Span<'static> {
+    Span::styled("  ·  ".to_string(), style::dim())
+}
+
+/// Dim connecting word ("over", "and", etc.).
+fn connector(text: String) -> Span<'static> {
+    Span::styled(text, style::dim())
+}
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let inner = style::panel(f, area, "diagnosis");
@@ -27,15 +65,19 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     // ── vibe ────────────────────────────────────────────────────────────
     lines.push(Line::from(vec![
-        Span::styled("vibe:   ", style::dim()),
+        section_label("vibe   ", style::PINK),
         Span::styled(
             format!("bot {}", vibe_label(bot)),
-            Style::default().fg(style::score_color(bot)),
+            Style::default()
+                .fg(style::score_color(bot))
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ·  ", style::dim()),
+        sep(),
         Span::styled(
             format!("driver {}", vibe_label(drv)),
-            Style::default().fg(style::score_color(drv)),
+            Style::default()
+                .fg(style::score_color(drv))
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
 
@@ -43,8 +85,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     if let Some(d) = diagnosis(bot, drv) {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("note:   ", style::dim()),
-            Span::styled(d.to_string(), style::label()),
+            section_label("note   ", style::GOLD),
+            note(d.to_string()),
         ]));
     }
 
@@ -62,19 +104,27 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         } else {
             "balanced — driver steers, agent acts"
         };
+        // "split   23/77   5 drv  17 bot   ·  bot-heavy …"
+        // Color the percentages by their owning side: driver=CYAN, bot=PINK.
         lines.push(Line::from(vec![
-            Span::styled("split:  ", style::dim()),
+            section_label("split  ", style::CYAN),
             Span::styled(
-                format!("{}/{}", s.drv_pct as u64, s.bot_pct as u64),
-                style::value(),
+                format!("{}", s.drv_pct as u64),
+                Style::default().fg(style::CYAN).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("  {} drv  ", s.drv_n), style::dim()),
-            Span::styled(format!("{} bot", s.bot_n), style::dim()),
-            Span::styled(format!("  ·  {}", summary), style::dim()),
+            connector("/".to_string()),
+            Span::styled(
+                format!("{}", s.bot_pct as u64),
+                Style::default().fg(style::PINK).add_modifier(Modifier::BOLD),
+            ),
+            connector(format!("   {} drv  ", s.drv_n)),
+            connector(format!("{} bot", s.bot_n)),
+            sep(),
+            note(summary.to_string()),
         ]));
 
-        // Loop length + driver gap median, on a separate line if we have
-        // anything informative to show.
+        // Loop length + driver gap median + cache offload, on a sub-line
+        // when present.
         let mut sub_bits: Vec<Span> = Vec::new();
         if !s.loop_lens.is_empty() {
             let p50 = s.loop_lens[s.loop_lens.len() / 2];
@@ -83,35 +133,35 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 .get((s.loop_lens.len() as f64 * 0.9) as usize)
                 .copied()
                 .unwrap_or(p50);
-            sub_bits.push(Span::styled(
-                format!("loop p50={} p90={}", p50, p90),
-                style::label(),
-            ));
+            sub_bits.push(connector("loop ".to_string()));
+            sub_bits.push(num(format!("{}", p50)));
+            sub_bits.push(connector("/".to_string()));
+            sub_bits.push(num(format!("{}", p90)));
+            sub_bits.push(connector(" (p50/p90)".to_string()));
         }
         if !s.drv_gaps.is_empty() {
             let mut g = s.drv_gaps.clone();
             g.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let med = g[g.len() / 2];
             if !sub_bits.is_empty() {
-                sub_bits.push(Span::styled("  ·  ", style::dim()));
+                sub_bits.push(sep());
             }
-            sub_bits.push(Span::styled(
-                format!("driver gap p50 {}", fmt_dur(med)),
-                style::label(),
-            ));
+            sub_bits.push(connector("drv gap ".to_string()));
+            sub_bits.push(data(fmt_dur(med)));
         }
         if s.cache_total > 0 {
             let pct = s.cache_reuse_n as f64 / s.cache_total as f64 * 100.0;
             if !sub_bits.is_empty() {
-                sub_bits.push(Span::styled("  ·  ", style::dim()));
+                sub_bits.push(sep());
             }
+            sub_bits.push(connector("cache offload ".to_string()));
             sub_bits.push(Span::styled(
-                format!("cache offload {:.0}%", pct),
-                style::label(),
+                format!("{:.0}%", pct),
+                Style::default().fg(style::LIME).add_modifier(Modifier::BOLD),
             ));
         }
         if !sub_bits.is_empty() {
-            let mut prefix = vec![Span::styled("        ", style::dim())];
+            let mut prefix = vec![Span::styled("       ", style::dim())];
             prefix.extend(sub_bits);
             lines.push(Line::from(prefix));
         }
@@ -139,19 +189,23 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             .unwrap_or((0, 0.0));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("peaks:  ", style::dim()),
-            Span::styled(
-                format!("busy {:02}:00 ({} reqs)", peak.0, peak.1),
-                style::label(),
-            ),
-            Span::styled("  slow ", style::dim()),
-            Span::styled(format!("{:02}:00", slow.0), style::label()),
-            Span::styled(" (", style::dim()),
+            section_label("peaks  ", style::LIME),
+            connector("busy ".to_string()),
+            num(format!("{:02}:00", peak.0)),
+            connector(" (".to_string()),
+            data(format!("{} reqs", peak.1)),
+            connector(")".to_string()),
+            sep(),
+            connector("slow ".to_string()),
+            num(format!("{:02}:00", slow.0)),
+            connector(" (".to_string()),
             Span::styled(
                 style::fmt_lat(slow.1.round() as u64),
-                Style::default().fg(style::heat_color(slow.1)),
+                Style::default()
+                    .fg(style::heat_color(slow.1))
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(")", style::dim()),
+            connector(")".to_string()),
         ]));
     }
 
@@ -160,23 +214,25 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         let total: u64 = app.agg.models.values().sum();
         let mut sorted: Vec<(&String, &u64)> = app.agg.models.iter().collect();
         sorted.sort_by(|a, b| b.1.cmp(a.1));
-        let bits: Vec<String> = sorted
-            .iter()
-            .take(3)
-            .map(|(m, c)| {
-                let pct = if total > 0 {
-                    **c as f64 / total as f64 * 100.0
-                } else {
-                    0.0
-                };
-                format!("{} {:.0}%", short_model(m), pct)
-            })
-            .collect();
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("models: ", style::dim()),
-            Span::styled(bits.join("  ·  "), style::label()),
-        ]));
+        let mut spans: Vec<Span> = vec![section_label("models ", style::VIOLET)];
+        for (idx, (m, c)) in sorted.iter().take(3).enumerate() {
+            if idx > 0 {
+                spans.push(sep());
+            }
+            let pct = if total > 0 {
+                **c as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            };
+            spans.push(Span::styled(
+                short_model(m),
+                Style::default().fg(style::VIOLET),
+            ));
+            spans.push(connector(" ".to_string()));
+            spans.push(num(format!("{:.0}%", pct)));
+        }
+        lines.push(Line::from(spans));
     }
 
     // Cluster into the upper-left of the panel. Paragraph doesn't wrap;

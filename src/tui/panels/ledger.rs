@@ -16,8 +16,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     let header = Row::new(vec![
         Cell::from(Span::styled("TIME", style::dim())),
-        Cell::from(Span::styled("Δin", style::dim())),
-        Cell::from(Span::styled("Δout", style::dim())),
+        Cell::from(Span::styled("drv·in", style::dim())),
+        Cell::from(Span::styled("bot·out", style::dim())),
         Cell::from(Span::styled("lat", style::dim())),
     ]);
 
@@ -40,10 +40,25 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             // the time + token columns dominate.
             let lat_style =
                 Style::default().fg(style::at_opacity(style::heat_color(r.lat as f64), 0.5));
+            // Driver column = chars the human typed this turn (u_ch).
+            // Tool-loop continuations have u_ch=0 — render dimly so the
+            // human-driven turns visually pop.
+            let drv_style = if r.u_ch > 0 {
+                Style::default().fg(style::CYAN)
+            } else {
+                style::dim()
+            };
+            // Bot column = output tokens. Always present when there's a
+            // response. Pink for visual parity with the chart's bot line.
+            let bot_style = if r.out > 0 {
+                Style::default().fg(style::PINK)
+            } else {
+                style::dim()
+            };
             Row::new(vec![
                 Cell::from(Span::styled(when, style::label())),
-                Cell::from(Span::styled(format!("+{}", short_n(r.r#in)), style::value())),
-                Cell::from(Span::styled(format!("+{}", short_n(r.out)), style::value())),
+                Cell::from(Span::styled(short_n(r.u_ch), drv_style)),
+                Cell::from(Span::styled(short_n(r.out), bot_style)),
                 Cell::from(Span::styled(style::fmt_lat(r.lat), lat_style)),
             ])
         })
