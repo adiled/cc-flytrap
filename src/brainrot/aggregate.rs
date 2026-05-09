@@ -82,6 +82,51 @@ impl Aggregate {
     }
 }
 
+/// Driver-vs-bot turn classification.
+///
+/// `Driver` = first request of a session OR any request following a gap >
+/// `BOT_LOOP_THRESHOLD` seconds (5s by default). `Bot` = anything else
+/// (continuation of a tool-loop).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TurnKind {
+    Driver,
+    Bot,
+}
+
+pub const BOT_LOOP_THRESHOLD: f64 = 5.0;
+
+/// Classify each record as Driver or Bot. Returns a vec aligned 1:1 with
+/// the input slice. Stable: walks each session in chronological order and
+/// inspects the inter-arrival gap from the previous response end.
+pub fn classify_turns(records: &[Record]) -> Vec<TurnKind> {
+    let mut kinds = vec![TurnKind::Driver; records.len()];
+    let mut by_sid: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, r) in records.iter().enumerate() {
+        let sid = r.sid.clone().unwrap_or_else(|| "_orphan".into());
+        by_sid.entry(sid).or_default().push(i);
+    }
+    for (_sid, mut idxs) in by_sid {
+        idxs.sort_by(|a, b| {
+            records[*a]
+                .ts
+                .partial_cmp(&records[*b].ts)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut prev_te: Option<f64> = None;
+        for i in &idxs {
+            let r = &records[*i];
+            let te = if r.te > 0.0 { r.te } else { r.ts };
+            kinds[*i] = match prev_te {
+                None => TurnKind::Driver,
+                Some(prev) if (r.ts - prev) > BOT_LOOP_THRESHOLD => TurnKind::Driver,
+                Some(_) => TurnKind::Bot,
+            };
+            prev_te = Some(te);
+        }
+    }
+    kinds
+}
+
 fn quantile(xs: &mut [f64], q: f64) -> f64 {
     if xs.is_empty() {
         return 0.0;

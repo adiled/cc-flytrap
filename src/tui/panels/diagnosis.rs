@@ -1,10 +1,14 @@
-//! DIAGNOSIS — vibe label + diagnosis() + peaks/models summary.
+//! DIAGNOSIS — vibe + split + peaks + models. The center-column heavyweight.
 //!
-//! Text deliberately clustered in the upper-left of the panel; the rest
-//! is intentional negative space. The brief: emptiness is the point —
-//! diagnostics dominates by what it doesn't fill, not by what it shows.
+//! Combines the legacy `brainrot split` summary into the diagnosis pane so
+//! driver/bot dynamics live alongside the vibe label and operational notes.
+//! Text deliberately clustered in the upper-left of the panel; the rest is
+//! intentional negative space — diagnostics dominates by what it doesn't
+//! fill, not by what it shows.
 
-use crate::brainrot::aggregate::{bot_score, diagnosis, driver_score, short_model, vibe_label};
+use crate::brainrot::aggregate::{
+    bot_score, classify_turns, diagnosis, driver_score, short_model, vibe_label, TurnKind,
+};
 use crate::tui::style;
 use crate::tui::App;
 use ratatui::layout::Rect;
@@ -12,6 +16,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
+use std::collections::HashMap;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let inner = style::panel(f, area, "diagnosis");
@@ -20,6 +25,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let drv = driver_score(&app.agg);
     let mut lines: Vec<Line> = Vec::new();
 
+    // ── vibe ────────────────────────────────────────────────────────────
     lines.push(Line::from(vec![
         Span::styled("vibe:   ", style::dim()),
         Span::styled(
@@ -33,13 +39,85 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         ),
     ]));
 
+    // ── note ────────────────────────────────────────────────────────────
     if let Some(d) = diagnosis(bot, drv) {
+        lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("note:   ", style::dim()),
             Span::styled(d.to_string(), style::label()),
         ]));
     }
 
+    // ── split summary (driver vs bot turns) ─────────────────────────────
+    if let Some(s) = compute_split(app) {
+        lines.push(Line::from(""));
+        let summary = if s.drv_n == 0 {
+            "no driver turns observed"
+        } else if s.bot_n == 0 {
+            "pure prompting — no tool loops"
+        } else if s.drv_pct >= 60.0 {
+            "driver-heavy — lots of typing, agent doing little tool work"
+        } else if s.bot_pct >= 75.0 {
+            "bot-heavy — agent grinding through tool loops"
+        } else {
+            "balanced — driver steers, agent acts"
+        };
+        lines.push(Line::from(vec![
+            Span::styled("split:  ", style::dim()),
+            Span::styled(
+                format!("{}/{}", s.drv_pct as u64, s.bot_pct as u64),
+                style::value(),
+            ),
+            Span::styled(format!("  {} drv  ", s.drv_n), style::dim()),
+            Span::styled(format!("{} bot", s.bot_n), style::dim()),
+            Span::styled(format!("  ·  {}", summary), style::dim()),
+        ]));
+
+        // Loop length + driver gap median, on a separate line if we have
+        // anything informative to show.
+        let mut sub_bits: Vec<Span> = Vec::new();
+        if !s.loop_lens.is_empty() {
+            let p50 = s.loop_lens[s.loop_lens.len() / 2];
+            let p90 = s
+                .loop_lens
+                .get((s.loop_lens.len() as f64 * 0.9) as usize)
+                .copied()
+                .unwrap_or(p50);
+            sub_bits.push(Span::styled(
+                format!("loop p50={} p90={}", p50, p90),
+                style::label(),
+            ));
+        }
+        if !s.drv_gaps.is_empty() {
+            let mut g = s.drv_gaps.clone();
+            g.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let med = g[g.len() / 2];
+            if !sub_bits.is_empty() {
+                sub_bits.push(Span::styled("  ·  ", style::dim()));
+            }
+            sub_bits.push(Span::styled(
+                format!("driver gap p50 {}", fmt_dur(med)),
+                style::label(),
+            ));
+        }
+        if s.cache_total > 0 {
+            let pct = s.cache_reuse_n as f64 / s.cache_total as f64 * 100.0;
+            if !sub_bits.is_empty() {
+                sub_bits.push(Span::styled("  ·  ", style::dim()));
+            }
+            sub_bits.push(Span::styled(
+                format!("cache reuse {:.0}%", pct),
+                style::label(),
+            ));
+        }
+        if !sub_bits.is_empty() {
+            let mut prefix = vec![Span::styled("        ", style::dim())];
+            prefix.extend(sub_bits);
+            lines.push(Line::from(prefix));
+        }
+    }
+
+    // ── peaks ───────────────────────────────────────────────────────────
     if !app.agg.by_hour.is_empty() {
         let peak = app
             .agg
@@ -59,17 +137,25 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             })
             .map(|(h, b)| (*h, b.lat_sum as f64 / b.n.max(1) as f64))
             .unwrap_or((0, 0.0));
+        lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("peaks:  ", style::dim()),
-            Span::styled(format!("busy {:02}:00 ({} reqs)", peak.0, peak.1), style::label()),
+            Span::styled(
+                format!("busy {:02}:00 ({} reqs)", peak.0, peak.1),
+                style::label(),
+            ),
             Span::styled("  slow ", style::dim()),
             Span::styled(format!("{:02}:00", slow.0), style::label()),
             Span::styled(" (", style::dim()),
-            Span::styled(format!("{:.0}ms", slow.1), Style::default().fg(style::heat_color(slow.1))),
+            Span::styled(
+                format!("{:.0}ms", slow.1),
+                Style::default().fg(style::heat_color(slow.1)),
+            ),
             Span::styled(")", style::dim()),
         ]));
     }
 
+    // ── models ──────────────────────────────────────────────────────────
     if !app.agg.models.is_empty() {
         let total: u64 = app.agg.models.values().sum();
         let mut sorted: Vec<(&String, &u64)> = app.agg.models.iter().collect();
@@ -86,19 +172,21 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 format!("{} {:.0}%", short_model(m), pct)
             })
             .collect();
+        lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("models: ", style::dim()),
             Span::styled(bits.join("  ·  "), style::label()),
         ]));
     }
 
-    // Cluster text into the upper-left ~half of the panel. The Paragraph
-    // doesn't wrap, so lines keep their natural width, but we constrain
-    // the render rect to enforce that the lower-right is left empty even
-    // when content could fit. The emptiness is the point.
+    // Cluster into the upper-left of the panel. Paragraph doesn't wrap;
+    // we constrain to ~3/5 panel width so the lower-right stays empty
+    // even when content could expand. The emptiness is the point.
     let line_count = lines.len() as u16;
     let text_h = (line_count + 1).min(inner.height);
-    let text_w = (inner.width.saturating_mul(3) / 5).max(40).min(inner.width);
+    let text_w = (inner.width.saturating_mul(3) / 5)
+        .max(40)
+        .min(inner.width);
     let text_area = Rect {
         x: inner.x,
         y: inner.y,
@@ -107,4 +195,123 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     };
 
     f.render_widget(Paragraph::new(lines), text_area);
+}
+
+// ─── Split summary computation ───────────────────────────────────────────────
+
+struct SplitSummary {
+    drv_n: u64,
+    bot_n: u64,
+    drv_pct: f64,
+    bot_pct: f64,
+    drv_gaps: Vec<f64>,
+    loop_lens: Vec<u64>,
+    cache_reuse_n: u64,
+    cache_total: u64,
+}
+
+/// Returns None if there are no records (skip the split row entirely).
+fn compute_split(app: &App) -> Option<SplitSummary> {
+    let records = &app.agg.records;
+    if records.is_empty() {
+        return None;
+    }
+    let kinds = classify_turns(records);
+
+    let mut drv_n = 0u64;
+    let mut bot_n = 0u64;
+    let mut bot_cr = 0u64;
+    let mut bot_cc = 0u64;
+
+    // Per-session walk for gap & loop length stats.
+    let mut by_sid: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, r) in records.iter().enumerate() {
+        let sid = r.sid.clone().unwrap_or_else(|| "_orphan".into());
+        by_sid.entry(sid).or_default().push(i);
+    }
+
+    let mut drv_gaps: Vec<f64> = Vec::new();
+    let mut loop_lens: Vec<u64> = Vec::new();
+    for (_sid, mut idxs) in by_sid {
+        idxs.sort_by(|a, b| {
+            records[*a]
+                .ts
+                .partial_cmp(&records[*b].ts)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut last_drv_ts: Option<f64> = None;
+        let mut cur: u64 = 0;
+        for i in &idxs {
+            if kinds[*i] == TurnKind::Driver {
+                if let Some(prev) = last_drv_ts {
+                    drv_gaps.push(records[*i].ts - prev);
+                }
+                last_drv_ts = Some(records[*i].ts);
+                if cur > 0 {
+                    loop_lens.push(cur);
+                }
+                cur = 1;
+            } else {
+                cur += 1;
+            }
+        }
+        if cur > 0 {
+            loop_lens.push(cur);
+        }
+    }
+
+    for (i, r) in records.iter().enumerate() {
+        match kinds[i] {
+            TurnKind::Driver => drv_n += 1,
+            TurnKind::Bot => {
+                bot_n += 1;
+                bot_cr += r.cr;
+                bot_cc += r.cc;
+            }
+        }
+    }
+
+    let total = drv_n + bot_n;
+    let drv_pct = if total > 0 {
+        drv_n as f64 / total as f64 * 100.0
+    } else {
+        0.0
+    };
+    let bot_pct = if total > 0 {
+        bot_n as f64 / total as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    loop_lens.sort();
+
+    Some(SplitSummary {
+        drv_n,
+        bot_n,
+        drv_pct,
+        bot_pct,
+        drv_gaps,
+        loop_lens,
+        cache_reuse_n: bot_cr,
+        cache_total: bot_cr + bot_cc,
+    })
+}
+
+fn fmt_dur(secs: f64) -> String {
+    let s = secs.abs();
+    if s < 60.0 {
+        format!("{}s", s as u64)
+    } else if s < 3600.0 {
+        let m = (s / 60.0) as u64;
+        let sec = (s as u64) % 60;
+        format!("{}m{:02}s", m, sec)
+    } else if s < 86400.0 {
+        let h = (s / 3600.0) as u64;
+        let m = ((s as u64) % 3600) / 60;
+        format!("{}h{:02}m", h, m)
+    } else {
+        let d = (s / 86400.0) as u64;
+        let h = ((s as u64) % 86400) / 3600;
+        format!("{}d{}h", d, h)
+    }
 }

@@ -12,7 +12,13 @@ use std::time::Instant;
 pub fn header(f: &mut Frame, area: Rect, app: &App) {
     let port = app.cfg.port;
     let pid = launchd_pid_from_lsof(port);
-    let uptime = uptime_str(app.started);
+    // Uptime now tracks the daemon (ccft run), not the TUI itself.
+    // Falls back to "-" when the proxy isn't running.
+    let uptime = if pid > 0 {
+        proxy_uptime(pid).unwrap_or_else(|| "-".into())
+    } else {
+        "-".into()
+    };
     let clock = clock_now();
 
     let left = Line::from(vec![
@@ -70,13 +76,9 @@ pub fn keybar(f: &mut Frame, area: Rect, _app: &App) {
     left.push(Span::raw(" "));
     push_vim(&mut left, ":a all", 1);
     left.push(gap());
-    push_vim(&mut left, ":d split", 1);
-    left.push(Span::raw(" "));
     push_vim(&mut left, ":s sessions", 1);
     left.push(Span::raw(" "));
     push_vim(&mut left, ":p perf", 1);
-    left.push(Span::raw(" "));
-    push_vim(&mut left, ":l live", 1);
     left.push(gap());
     push_vim(&mut left, ":/ search", 1);
     left.push(Span::raw(" "));
@@ -118,17 +120,65 @@ fn gap() -> Span<'static> {
     Span::styled("   ", style::dim())
 }
 
+#[allow(dead_code)]
 fn uptime_str(started: Instant) -> String {
     let s = started.elapsed().as_secs();
+    fmt_secs(s)
+}
+
+fn fmt_secs(s: u64) -> String {
     if s < 60 {
         format!("{}s", s)
     } else if s < 3600 {
         format!("{}m", s / 60)
-    } else {
+    } else if s < 86400 {
         let h = s / 3600;
         let m = (s % 3600) / 60;
         format!("{}h{:02}m", h, m)
+    } else {
+        let d = s / 86400;
+        let h = (s % 86400) / 3600;
+        format!("{}d{}h", d, h)
     }
+}
+
+/// Uptime of the proxy daemon (`ccft run` process) by reading its elapsed
+/// time from `ps -o etime= -p PID`. ps returns "[[DD-]hh:]mm:ss" — we parse
+/// that into seconds and reformat through `fmt_secs` for consistency.
+fn proxy_uptime(pid: u32) -> Option<String> {
+    use std::process::Command;
+    if pid == 0 {
+        return None;
+    }
+    let out = Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    parse_etime_secs(&raw).map(fmt_secs)
+}
+
+/// Parse `ps -o etime` format: `[[DD-]hh:]mm:ss` → total seconds.
+fn parse_etime_secs(s: &str) -> Option<u64> {
+    // Split on '-' first to peel off optional days, then on ':' for h:m:s.
+    let (days, rest) = match s.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0u64, s),
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    let nums: Vec<u64> = parts.iter().filter_map(|p| p.trim().parse().ok()).collect();
+    let secs = match nums.len() {
+        2 => nums[0] * 60 + nums[1],
+        3 => nums[0] * 3600 + nums[1] * 60 + nums[2],
+        _ => return None,
+    };
+    Some(days * 86400 + secs)
 }
 
 fn clock_now() -> String {

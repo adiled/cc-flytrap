@@ -26,10 +26,8 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
     None,
-    Split,
     Sessions,
     Perf,
-    Live,
     Help,
 }
 
@@ -178,10 +176,8 @@ impl App {
                 self.range_preset = RangePreset::H24;
                 self.refresh();
             }
-            KeyCode::Char('d') => self.overlay = Overlay::Split,
             KeyCode::Char('s') => self.overlay = Overlay::Sessions,
             KeyCode::Char('p') => self.overlay = Overlay::Perf,
-            KeyCode::Char('l') => self.overlay = Overlay::Live,
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             _ => {}
         }
@@ -259,7 +255,6 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
         Block::default().style(RStyle::default().bg(RColor::Rgb(0x02, 0x05, 0x0e))),
         area,
     );
-    crate::tui::style::paint_substrate_noise(f.buffer_mut());
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -331,9 +326,9 @@ fn body(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
         .direction(Direction::Vertical)
         .spacing(1)
         .constraints([
-            Constraint::Percentage(36),
-            Constraint::Percentage(18),
-            Constraint::Percentage(46),
+            Constraint::Percentage(35),
+            Constraint::Percentage(22),
+            Constraint::Percentage(43),
         ])
         .split(cols[1]);
 

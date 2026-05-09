@@ -63,7 +63,7 @@ pub fn label() -> Style {
 }
 
 pub fn value() -> Style {
-    Style::default().fg(WHITE).add_modifier(Modifier::BOLD)
+    Style::default().fg(WHITE)
 }
 
 pub fn dim() -> Style {
@@ -86,11 +86,11 @@ pub fn alert() -> Style {
 }
 
 pub fn key_hint() -> Style {
-    Style::default().fg(PINK).add_modifier(Modifier::BOLD)
+    Style::default().fg(PINK)
 }
 
 pub fn active_chip() -> Style {
-    Style::default().fg(PINK).add_modifier(Modifier::BOLD)
+    Style::default().fg(PINK)
 }
 
 pub fn score_color(score: u32) -> Color {
@@ -292,7 +292,6 @@ fn paint_panel_border(buf: &mut Buffer, area: Rect, seed: &str) {
     let (luminance, is_burst) = compute_perimeter_luminance(&cells, seed, t);
 
     paint_cells_with_signal(buf, &cells, &hue, &luminance, &is_burst, seed);
-    paint_outward_glow(buf, area, &cells, &hue, &luminance, &is_burst, seed);
 }
 
 
@@ -564,6 +563,7 @@ fn paint_cells_with_signal(
     is_burst: &[bool],
     seed: &str,
 ) {
+    let n = cells.len();
     let p_temp = phase_from(seed, "temp");
 
     for (i, &(x, y, default_glyph)) in cells.iter().enumerate() {
@@ -596,108 +596,52 @@ fn paint_cells_with_signal(
         let final_color = scale_color(color, lum);
         set_char(buf, x, y, default_glyph, fg(final_color));
     }
-}
 
-// ─── Substrate halo at bursts ────────────────────────────────────────────────
-//
-// One-eighth blocks (`▔ ▁ ▏ ▕`) painted in the substrate cell adjacent to
-// each BURST cell. Per-burst hash decides which substrate-side direction(s)
-// receive the halo (asymmetric — not every burst halos every direction).
-// Uses the burst cell's hue, brightened in-family. Corners halo on both
-// perpendicular axes.
-
-fn paint_outward_glow(
-    buf: &mut Buffer,
-    area: Rect,
-    cells: &[(u16, u16, char)],
-    hue: &[f32],
-    luminance: &[f32],
-    is_burst: &[bool],
-    seed: &str,
-) {
-    let right = area.x + area.width.saturating_sub(1);
-    let bottom = area.y + area.height.saturating_sub(1);
-    let p_temp = phase_from(seed, "temp");
-
-    for (i, &(x, y, glyph)) in cells.iter().enumerate() {
+    // ── On-rail glow ────────────────────────────────────────────────────
+    //
+    // Each BURST cell tints its own background AND the backgrounds of its
+    // same-edge ±1 / ±2 neighbors. The rail glyph stays drawn on top; the
+    // tint is in the burst's hue, decaying with distance. Result: a 3-5
+    // cell luminous zone ALONG THE RAIL at each burst — never floating in
+    // off-rail substrate.
+    //
+    // Dimmed bursts (in flying-duck dead zones) suppress glow.
+    let p_temp_glow = phase_from(seed, "temp");
+    for i in 0..n {
         if !is_burst[i] {
             continue;
         }
-        // Suppress halo for bursts that have been dimmed by a flying-duck
-        // dead zone. The duck is flying; only residue falls; no halo.
         if luminance[i] < BURST_LUM_MIN * 0.80 {
-            continue;
+            continue; // dimmed by dead zone — duck flying, no glow
         }
 
-        let on_top = y == area.y;
-        let on_bot = y == bottom;
-        let on_left = x == area.x;
-        let on_right = x == right;
-        let is_corner = matches!(glyph, '╭' | '╮' | '╰' | '╯');
-
-        let mut targets: Vec<(i32, i32)> = Vec::with_capacity(2);
-        if on_top {
-            targets.push((0, -1));
-        }
-        if on_bot {
-            targets.push((0, 1));
-        }
-        if on_left {
-            targets.push((-1, 0));
-        }
-        if on_right {
-            targets.push((1, 0));
-        }
-        if targets.is_empty() {
-            continue;
-        }
-
+        // Burst's own hue (with the same temp jitter as the FG paint).
         let p = i as f32;
-        let temp_shift = (p * std::f32::consts::TAU / 80.0 + p_temp).sin() * 0.06;
-        let h = (hue[i] + temp_shift).clamp(0.0, 1.0);
-        let base_color = lerp_rgb(NEON_MAGENTA, NEON_CYAN, h);
+        let temp_shift =
+            (p * std::f32::consts::TAU / 80.0 + p_temp_glow).sin() * 0.06;
+        let h_self = (hue[i] + temp_shift).clamp(0.0, 1.0);
+        let hue_color = lerp_rgb(NEON_MAGENTA, NEON_CYAN, h_self);
 
-        let cell_h = cell_hash(seed, x, y);
-        for (k, &(dx, dy)) in targets.iter().enumerate() {
-            let roll = ((cell_h.wrapping_shr(8 * k as u32)) & 0xFF) as f32 / 0xFF as f32;
-            // Corners halo on both axes; mid-edge bursts skip ~30% of directions
-            // to keep the halo asymmetric.
-            if !is_corner && roll < 0.30 {
+        // Distance-decayed tint amounts.
+        let band = [(0i32, 0.22f32), (-1, 0.12), (1, 0.12), (-2, 0.05), (2, 0.05)];
+        let (xi, yi, _) = cells[i];
+        for (offset, amount) in band {
+            let j = ((i as i32 + offset).rem_euclid(n as i32)) as usize;
+            let (xj, yj, _) = cells[j];
+            // Same-edge only — burst glow doesn't bleed around corners.
+            // (For the burst itself, offset=0, this is trivially true.)
+            if xi != xj && yi != yj {
                 continue;
             }
-
-            let nx = x as i32 + dx;
-            let ny = y as i32 + dy;
-            if nx < 0 || ny < 0 {
-                continue;
+            // Lerp BG from substrate toward the burst's hue at `amount`.
+            let bg_tinted = lerp_rgb(BG, hue_color, amount);
+            if let Some(cell) = buf.cell_mut((xj, yj)) {
+                cell.set_bg(bg_tinted);
             }
-            let nx = nx as u16;
-            let ny = ny as u16;
-            let ba = buf.area;
-            if nx < ba.x || ny < ba.y || nx >= ba.x + ba.width || ny >= ba.y + ba.height {
-                continue;
-            }
-            if let Some(c) = buf.cell((nx, ny)) {
-                let sym = c.symbol();
-                let first = sym.chars().next().unwrap_or(' ');
-                if first != ' ' && first != '\0' {
-                    continue;
-                }
-            }
-
-            // Halo in the burst's own hue, faintly. ~12% intensity.
-            let glow_color = scale_color(base_color, 0.12);
-            let glyph = match (dx, dy) {
-                (0, -1) => '▔',
-                (0, 1) => '▁',
-                (-1, 0) => '▕',
-                (1, 0) => '▏',
-                _ => continue,
-            };
-            set_char(buf, nx, ny, glyph, fg(glow_color));
         }
     }
 }
+
 
 
 // ─── Phase 7: temporal phase offset ──────────────────────────────────────────
@@ -718,36 +662,6 @@ fn time_offset() -> f32 {
     TIME_OFFSET.with(|c| c.get())
 }
 
-// ─── Phase 6: substrate phosphor noise ───────────────────────────────────────
-//
-// Painted at frame level after the BG block fill, before any panel chrome.
-// Each cell at (x, y) gets a deterministic-hash-derived RGB perturbation of
-// ±1 unit. Below the conscious threshold — the dark areas should feel deep
-// and empty, NOT textured. Higher amplitudes start reading as surface grain
-// which kills the "optically thick darkness" feel.
-
-pub fn paint_substrate_noise(buf: &mut Buffer) {
-    let ba = buf.area;
-    let bg_r = 0x02_i32;
-    let bg_g = 0x05_i32;
-    let bg_b = 0x0e_i32;
-    for y in ba.y..(ba.y + ba.height) {
-        for x in ba.x..(ba.x + ba.width) {
-            let h = cell_hash("substrate", x, y);
-            let rr = ((h & 0xFF) as i32) - 128; // -128..127
-            // ±1 unit max in any channel — subliminal, not visible as texture.
-            let dr = rr / 128;
-            let dg = (((h >> 8) & 0xFF) as i32 - 128) / 128;
-            let db = (((h >> 16) & 0xFF) as i32 - 128) / 128;
-            let r = (bg_r + dr).clamp(0, 255) as u8;
-            let g = (bg_g + dg).clamp(0, 255) as u8;
-            let b = (bg_b + db).clamp(0, 255) as u8;
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_bg(Color::Rgb(r, g, b));
-            }
-        }
-    }
-}
 
 /// Paint a rectangular signal-border around `area` — same thematics as
 /// the panel chrome. Used for the active range chip's outline and any

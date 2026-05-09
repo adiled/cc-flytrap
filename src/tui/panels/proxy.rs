@@ -24,9 +24,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             port_dot,
             Span::raw(" "),
-            Span::styled(format!("{}", port), style::value()),
+            Span::styled(format!("{}", port), style::label()),
             Span::raw("  "),
-            Span::styled("port", style::label()),
+            Span::styled("port", style::dim()),
         ]),
         Line::from(vec![
             ledger_dot,
@@ -36,18 +36,18 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             Span::styled("⌁", Style::default().fg(style::PINK)),
             Span::raw(" "),
-            Span::styled(app.agg.n.to_string(), style::value()),
+            Span::styled(app.agg.n.to_string(), style::label()),
             Span::raw(" "),
-            Span::styled("reqs", style::label()),
+            Span::styled("reqs", style::dim()),
         ]),
         Line::from(vec![
             Span::styled("⌖", Style::default().fg(style::PINK)),
             Span::raw(" "),
-            Span::styled(app.agg.sessions.len().to_string(), style::value()),
+            Span::styled(app.agg.sessions.len().to_string(), style::label()),
             Span::raw(" "),
             Span::styled(
                 if app.agg.sessions.len() == 1 { "session" } else { "sessions" },
-                style::label(),
+                style::dim(),
             ),
         ]),
     ];

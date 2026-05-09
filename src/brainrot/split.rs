@@ -2,17 +2,10 @@
 //! first turn or gap > 5s = driver-initiated, else bot continuation.
 //! Mirrors brainrot.py classify_turns + split_aggregate + cmd_split.
 
+use crate::brainrot::aggregate::{classify_turns, TurnKind};
 use crate::ledger_read::{compute_coverage, iter_records, load_state_events, parse_range, Record};
 use crate::theme::*;
 use std::collections::HashMap;
-
-const BOT_LOOP_THRESHOLD: f64 = 5.0;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Driver,
-    Bot,
-}
 
 pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let spec = if args.is_empty() { "today".to_string() } else { args.join(" ") };
@@ -42,7 +35,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let kinds = classify(&records);
+    let kinds = classify_turns(&records);
 
     let mut drv_n = 0u64;
     let mut drv_tok = 0u64;
@@ -68,7 +61,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         });
         let mut last_drv_ts: Option<f64> = None;
         for i in &idxs {
-            if kinds[*i] == Kind::Driver {
+            if kinds[*i] == TurnKind::Driver {
                 if let Some(prev) = last_drv_ts {
                     drv_gaps.push(records[*i].ts - prev);
                 }
@@ -85,7 +78,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         });
         let mut cur: u32 = 0;
         for i in &idxs {
-            if kinds[*i] == Kind::Driver {
+            if kinds[*i] == TurnKind::Driver {
                 if cur > 0 {
                     loop_lens.push(cur);
                 }
@@ -103,13 +96,13 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     for (i, r) in records.iter().enumerate() {
         let net_in = r.r#in.saturating_sub(r.cr).saturating_sub(r.cc);
         match kinds[i] {
-            Kind::Driver => {
+            TurnKind::Driver => {
                 drv_n += 1;
                 drv_tok += net_in;
                 drv_lats.push(r.lat);
                 drv_in_total += r.r#in;
             }
-            Kind::Bot => {
+            TurnKind::Bot => {
                 bot_n += 1;
                 bot_tok += net_in;
                 bot_lats.push(r.lat);
@@ -246,32 +239,6 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
     Ok(())
-}
-
-fn classify(records: &[Record]) -> Vec<Kind> {
-    let mut kinds = vec![Kind::Driver; records.len()];
-    let mut by_sid: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, r) in records.iter().enumerate() {
-        let sid = r.sid.clone().unwrap_or_else(|| "_orphan".into());
-        by_sid.entry(sid).or_default().push(i);
-    }
-    for (_sid, mut idxs) in by_sid {
-        idxs.sort_by(|a, b| {
-            records[*a].ts.partial_cmp(&records[*b].ts).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let mut prev_te: Option<f64> = None;
-        for i in &idxs {
-            let r = &records[*i];
-            let te = if r.te > 0.0 { r.te } else { r.ts };
-            kinds[*i] = match prev_te {
-                None => Kind::Driver,
-                Some(prev) if (r.ts - prev) > BOT_LOOP_THRESHOLD => Kind::Driver,
-                Some(_) => Kind::Bot,
-            };
-            prev_te = Some(te);
-        }
-    }
-    kinds
 }
 
 fn fmt_with_commas(n: u64) -> String {
