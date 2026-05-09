@@ -86,8 +86,9 @@ enum Cmd {
     /// Seed the ledger from Claude Code's local session JSONLs at
     /// ~/.claude/projects/. Semantics: **session is the unit of
     /// replacement.** For each affected session (selected via --session
-    /// or by date range with --since/--until), every existing ledger row
-    /// for that session is dropped, and one fresh row is inserted per
+    /// or by date range with --since/--until — applied to the session's
+    /// START date, not per-turn), every existing ledger row for that
+    /// session is dropped, and one fresh row is inserted per
     /// user→assistant turn pair found in the JSONL. Ledger rows for
     /// sessions NOT being seeded are preserved untouched. Original
     /// ledger backed up to ledger.jsonl.bak.<unix-ts> before any write.

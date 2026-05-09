@@ -71,17 +71,37 @@ pub fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Pick which sessions to operate on:
     //   --session SID:           that one session
-    //   --since/--until:         every session that has at least one
-    //                            paired turn (te is Some) within the range
+    //   --since/--until:         every session whose START date (earliest
+    //                            paired turn ts in that session) falls in
+    //                            the range. Per-turn filtering is the
+    //                            wrong granularity — a long-running
+    //                            session that began before the range but
+    //                            had turns in it would otherwise get half-
+    //                            replaced. Whole-session is the unit.
+    let session_starts: HashMap<String, f64> = {
+        let mut m: HashMap<String, f64> = HashMap::new();
+        for t in &all_turns {
+            if t.te.is_none() {
+                continue;
+            }
+            m.entry(t.sid.clone())
+                .and_modify(|cur| {
+                    if t.ts < *cur {
+                        *cur = t.ts;
+                    }
+                })
+                .or_insert(t.ts);
+        }
+        m
+    };
     let affected: HashSet<String> = if let Some(sid) = args.session.as_deref() {
         std::iter::once(sid.to_string()).collect()
     } else {
-        all_turns
+        session_starts
             .iter()
-            .filter(|t| t.te.is_some())
-            .filter(|t| since.map(|s| t.ts >= s).unwrap_or(true))
-            .filter(|t| until.map(|u| t.ts <= u).unwrap_or(true))
-            .map(|t| t.sid.clone())
+            .filter(|(_, &start)| since.map(|s| start >= s).unwrap_or(true))
+            .filter(|(_, &start)| until.map(|u| start <= u).unwrap_or(true))
+            .map(|(sid, _)| sid.clone())
             .collect()
     };
     println!("affected sessions: {}", affected.len());
