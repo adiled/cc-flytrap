@@ -14,6 +14,7 @@ mod ledger_read;
 mod lifecycle;
 mod perf;
 mod flytrap;
+mod seed;
 mod service;
 mod session;
 mod sse_tap;
@@ -81,6 +82,28 @@ enum Cmd {
         /// Range, e.g. `today`, `7d`, `24h`. Default: today.
         #[arg(trailing_var_arg = true)]
         range: Vec<String>,
+    },
+    /// Seed the ledger from Claude Code's local session JSONLs at
+    /// ~/.claude/projects/. Semantics: **session is the unit of
+    /// replacement.** For each affected session (selected via --session
+    /// or by date range with --since/--until), every existing ledger row
+    /// for that session is dropped, and one fresh row is inserted per
+    /// user→assistant turn pair found in the JSONL. Ledger rows for
+    /// sessions NOT being seeded are preserved untouched. Original
+    /// ledger backed up to ledger.jsonl.bak.<unix-ts> before any write.
+    Seed {
+        /// Seed only this session id. Mutually exclusive with --since/--until.
+        #[arg(long)]
+        session: Option<String>,
+        /// ISO date (YYYY-MM-DD) or epoch seconds, lower bound (inclusive).
+        #[arg(long)]
+        since: Option<String>,
+        /// ISO date (YYYY-MM-DD) or epoch seconds, upper bound (inclusive).
+        #[arg(long)]
+        until: Option<String>,
+        /// Show what would change without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -152,6 +175,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Logs { n } => tail_logs(n),
         Cmd::Brainrot { args } => brainrot::run(&args),
         Cmd::Perf { range } => perf::run(&range.join(" ")),
+        Cmd::Seed { session, since, until, dry_run } => {
+            seed::run(seed::Args { session, since, until, dry_run })
+        }
     }
 }
 
