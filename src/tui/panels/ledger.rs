@@ -44,7 +44,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 Cell::from(Span::styled(when, style::label())),
                 Cell::from(Span::styled(format!("+{}", short_n(r.r#in)), style::value())),
                 Cell::from(Span::styled(format!("+{}", short_n(r.out)), style::value())),
-                Cell::from(Span::styled(format!("{}ms", r.lat), lat_style)),
+                Cell::from(Span::styled(style::fmt_lat(r.lat), lat_style)),
             ])
         })
         .collect();

@@ -106,7 +106,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 sub_bits.push(Span::styled("  ·  ", style::dim()));
             }
             sub_bits.push(Span::styled(
-                format!("cache reuse {:.0}%", pct),
+                format!("cache offload {:.0}%", pct),
                 style::label(),
             ));
         }
@@ -148,7 +148,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!("{:02}:00", slow.0), style::label()),
             Span::styled(" (", style::dim()),
             Span::styled(
-                format!("{:.0}ms", slow.1),
+                style::fmt_lat(slow.1.round() as u64),
                 Style::default().fg(style::heat_color(slow.1)),
             ),
             Span::styled(")", style::dim()),
@@ -222,6 +222,7 @@ fn compute_split(app: &App) -> Option<SplitSummary> {
     let mut bot_n = 0u64;
     let mut bot_cr = 0u64;
     let mut bot_cc = 0u64;
+    let mut bot_in = 0u64;
 
     // Per-session walk for gap & loop length stats.
     let mut by_sid: HashMap<String, Vec<usize>> = HashMap::new();
@@ -267,6 +268,7 @@ fn compute_split(app: &App) -> Option<SplitSummary> {
                 bot_n += 1;
                 bot_cr += r.cr;
                 bot_cc += r.cc;
+                bot_in += r.r#in;
             }
         }
     }
@@ -293,7 +295,7 @@ fn compute_split(app: &App) -> Option<SplitSummary> {
         drv_gaps,
         loop_lens,
         cache_reuse_n: bot_cr,
-        cache_total: bot_cr + bot_cc,
+        cache_total: bot_in + bot_cr + bot_cc,
     })
 }
 

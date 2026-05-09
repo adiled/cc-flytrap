@@ -288,7 +288,7 @@ fn sessions_lines(app: &App) -> Vec<Line<'static>> {
             Span::styled(format!("  {:10}", sid_short), style::label()),
             Span::styled(format!("  {:>4}", s.n), style::value()),
             Span::styled(format!("  {:>8}", short_n(s.tot)), style::value()),
-            Span::styled(format!("   {:>6}ms", avg_lat),
+            Span::styled(format!("   {:>6}", style::fmt_lat(avg_lat)),
                 Style::default().fg(style::heat_color(avg_lat as f64))),
             Span::styled(format!("  {:>7}", span), style::label()),
             Span::styled(format!("  {}", top_model), style::dim()),

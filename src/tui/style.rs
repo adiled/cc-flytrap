@@ -792,6 +792,17 @@ pub fn at_opacity(c: Color, opacity: f32) -> Color {
     scale_color(c, opacity.clamp(0.0, 1.0))
 }
 
+/// Format a millisecond latency for display: `<1000ms` keeps `Nms`,
+/// `≥1000ms` collapses to `N.Ns`. One decimal place is enough at the
+/// readability threshold the user sees in the dashboard.
+pub fn fmt_lat(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{}ms", ms)
+    } else {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    }
+}
+
 /// Build a per-panel seed string from the panel's position. Two panels at
 /// different positions → different noise patterns; the same panel at the
 /// same position → same noise across redraws.

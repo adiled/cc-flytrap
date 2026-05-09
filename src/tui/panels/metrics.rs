@@ -41,10 +41,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let drv = driver_score(&app.agg, &app.baseline);
     let mut lats = app.agg.lats.clone();
     let p99 = percentile(&mut lats, 99.0) as u64;
-    let cache_total = app.agg.records.iter().map(|r| r.cr + r.cc).sum::<u64>();
-    let cache_read = app.agg.records.iter().map(|r| r.cr).sum::<u64>();
-    let cache_pct = if cache_total > 0 {
-        cache_read as f64 / cache_total as f64 * 100.0
+    // Cache offload: of *all* input the model had to ingest, what fraction
+    // came from cache (cheap path). Includes uncached `in` in the denominator
+    // so the metric reflects how much of the total burden is being offloaded,
+    // not just hit-rate within the cacheable portion.
+    let total_input: u64 = app.agg.records.iter().map(|r| r.r#in + r.cr + r.cc).sum();
+    let cache_read: u64 = app.agg.records.iter().map(|r| r.cr).sum();
+    let cache_pct = if total_input > 0 {
+        cache_read as f64 / total_input as f64 * 100.0
     } else {
         0.0
     };
@@ -78,7 +82,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         f,
         cells[2],
         "P99 LAT",
-        &format!("{}ms", p99),
+        &style::fmt_lat(p99),
         "p99",
         &series.p99,
         style::GOLD,
@@ -88,7 +92,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         cells[3],
         "CACHE",
         &format!("{:.0}%", cache_pct),
-        "reuse",
+        "offload",
         &series.cache,
         style::LIME,
     );
@@ -241,13 +245,15 @@ fn compute_series(app: &App, n: usize) -> Series {
         let p99_v = percentile(&mut lats, 99.0) as f32;
         let cr_total: u64 = bucket.iter().map(|r| r.cr).sum();
         let cc_total: u64 = bucket.iter().map(|r| r.cc).sum();
+        let in_total: u64 = bucket.iter().map(|r| r.r#in).sum();
+        let total_in = in_total + cr_total + cc_total;
 
         let agg = Aggregate::ingest(bucket);
         bot[i] = bot_score(&agg, &app.baseline) as f32 / 100.0;
         driver[i] = driver_score(&agg, &app.baseline) as f32 / 100.0;
         p99[i] = p99_v;
-        cache[i] = if cr_total + cc_total > 0 {
-            cr_total as f32 / (cr_total + cc_total) as f32
+        cache[i] = if total_in > 0 {
+            cr_total as f32 / total_in as f32
         } else {
             0.0
         };

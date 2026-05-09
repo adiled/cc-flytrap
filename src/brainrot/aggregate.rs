@@ -488,6 +488,26 @@ fn driver_acceleration(a: &Aggregate) -> f64 {
     logistic_score(z, 1.5)
 }
 
+/// Sample-size confidence factor in [0, 1]. With few records the per-window
+/// statistics (medians, CVs, z-scores) are essentially noise, and small-n
+/// scores can land far from baseline by pure chance. Multiplying the
+/// (raw_score − 50) excursion by this factor shrinks scores toward the
+/// neutral 50 when n is small, and lets the raw score through once n
+/// crosses the saturation threshold.
+///
+/// Linear ramp from 0 at n=0 to 1 at n=`SAMPLE_FULL`. Tuned so a window
+/// with ≥ 50 records gets full weight; a window with 5 records gets only
+/// 10% of the deviation.
+const SAMPLE_FULL: f64 = 50.0;
+
+fn confidence(n: u64) -> f64 {
+    (n as f64 / SAMPLE_FULL).clamp(0.0, 1.0)
+}
+
+fn shrink(raw_score: f64, confidence: f64) -> f64 {
+    50.0 + (raw_score - 50.0) * confidence
+}
+
 pub fn driver_score(a: &Aggregate, baseline: &Baseline) -> u32 {
     if a.n == 0 || baseline.n_records == 0 {
         return 0;
@@ -499,7 +519,8 @@ pub fn driver_score(a: &Aggregate, baseline: &Baseline) -> u32 {
     let accel = driver_acceleration(a);
     let composite =
         sprawl * 0.25 + pace * 0.20 + bloat * 0.25 + thrash * 0.15 + accel * 0.15;
-    composite.round().clamp(0.0, 100.0) as u32
+    let shrunk = shrink(composite, confidence(a.n));
+    shrunk.round().clamp(0.0, 100.0) as u32
 }
 
 // ─── Bot-side (output-health-focused) ────────────────────────────────────────
@@ -579,7 +600,8 @@ pub fn bot_score(a: &Aggregate, baseline: &Baseline) -> u32 {
     let cache_drag = bot_cache_drag(a, baseline);
     let composite =
         brevity * 0.35 + stalling * 0.25 + wandering * 0.25 + cache_drag * 0.15;
-    composite.round().clamp(0.0, 100.0) as u32
+    let shrunk = shrink(composite, confidence(a.n));
+    shrunk.round().clamp(0.0, 100.0) as u32
 }
 
 // ─── Labels ──────────────────────────────────────────────────────────────────
