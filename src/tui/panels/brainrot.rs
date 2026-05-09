@@ -14,12 +14,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Axis, Chart, Dataset, GraphType, Paragraph};
 use ratatui::Frame;
 
-/// Minimum records per bucket before bot_score is plotted. Heavily-shrunk
-/// scores from tiny buckets cluster around 50 and just add visual noise
-/// that hides the actual signal. This threshold matches the bot_score
-/// confidence ramp's lower-end (10% confidence at n=5).
-const MIN_BUCKET_N: usize = 5;
-
 /// Compute the effective time window for chart rendering. Uses the active
 /// data span (first → last record) when records exist; otherwise falls back
 /// to the calendar range. Matches the metrics-tile sparkline behavior so a
@@ -132,45 +126,11 @@ fn range_chips(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(Line::from(spans)), row[1]);
 }
 
-/// Maximum number of empty bucket-widths between two data points before we
-/// treat them as belonging to separate "runs" and break the line. With
-/// `GraphType::Line`, ratatui blindly draws a straight segment between
-/// consecutive points in a dataset regardless of their x-distance, which
-/// is misleading when the user wasn't active for days/weeks. A gap larger
-/// than this threshold ends the current run and starts a fresh one — the
-/// chart shows a real visual gap instead of a phantom diagonal.
-///
-/// Same convention as financial charts: no trades on weekends → no line.
-const GAP_BREAK_BUCKETS: f64 = 2.5;
-
-/// Split a chronologically-sorted point series into contiguous runs at
-/// gaps larger than `max_gap` seconds. Each run becomes its own ratatui
-/// Dataset, so the line breaks visually at the gap.
-fn split_at_gaps(pts: &[(f64, f64)], max_gap: f64) -> Vec<Vec<(f64, f64)>> {
-    let mut runs: Vec<Vec<(f64, f64)>> = Vec::new();
-    let mut current: Vec<(f64, f64)> = Vec::new();
-    let mut last_x: Option<f64> = None;
-    for &p in pts {
-        if let Some(lx) = last_x {
-            if p.0 - lx > max_gap && !current.is_empty() {
-                runs.push(std::mem::take(&mut current));
-            }
-        }
-        current.push(p);
-        last_x = Some(p.0);
-    }
-    if !current.is_empty() {
-        runs.push(current);
-    }
-    runs
-}
-
 fn chart(f: &mut Frame, area: Rect, app: &App) {
     let bucket_count = ((area.width as usize).saturating_sub(8)).max(20);
     let (since, until) = effective_range(app);
     let span = (until - since).max(1.0);
     let bucket_s = span / bucket_count as f64;
-    let max_gap = bucket_s * GAP_BREAK_BUCKETS;
 
     let mut by_bucket: Vec<Vec<Record>> = (0..bucket_count).map(|_| Vec::new()).collect();
     for r in &app.agg.records {
@@ -179,72 +139,84 @@ fn chart(f: &mut Frame, area: Rect, app: &App) {
         by_bucket[clamped].push(r.clone());
     }
 
-    // Driver bootstrap detection — when the baseline has no u_ch records yet,
-    // every per-bucket driver_score returns 50 by design. Drawing that as a
-    // flat horizontal line at the chart midline is misleading AND it sits
-    // exactly where bot_score values cluster after sample-size shrinkage,
-    // hiding the bot line entirely. Skip the driver series in that case.
+    // Driver bootstrap: when there's no historical u_ch baseline yet, every
+    // per-bucket driver_score returns 50 by design. Skip the driver series
+    // entirely in that case so it doesn't paint a flat misleading line.
     let driver_bootstrapping = driver_is_bootstrapping(&app.baseline);
 
+    // Per-bucket plotting rule (user-defined semantics):
+    //
+    //   bucket empty                      → bot = 0, driver = 0
+    //                                       (whole system idle this slot)
+    //   bucket has records, u_ch > 0      → both computed normally
+    //   bucket has records, u_ch = 0      → driver = 0 (no human input);
+    //                                       bot computed normally
+    //   bucket has u_ch > 0 but no out    → bot = no plot (human active,
+    //                                       bot silent — edge case)
+    //
+    // Rationale: driver is a kinetics metric where absence == zero is
+    // semantically correct (no typing → 0 chars/min). Bot is a health
+    // metric over actual API responses; no responses → no opinion, but
+    // when the *whole system* is idle (bucket empty) we plot 0 because
+    // there's nothing weird about it. The "human active, bot silent"
+    // edge case rarely fires in our schema (records are API request/
+    // response pairs) but we guard for it anyway.
     let mut bot_pts: Vec<(f64, f64)> = Vec::new();
     let mut drv_pts: Vec<(f64, f64)> = Vec::new();
-    let mut gap_pts: Vec<(f64, f64)> = Vec::new();
     for (i, bucket) in by_bucket.into_iter().enumerate() {
         let mid_ts = since + bucket_s * (i as f64 + 0.5);
-        if bucket.len() < MIN_BUCKET_N {
-            // Empty (or noise-floor) bucket — record a white "no activity"
-            // dot at y=0 so the gap is visible as a continuous tick row
-            // along the bottom rather than an empty void. No interpolation
-            // implied since these dots aren't part of the bot/driver line.
-            gap_pts.push((mid_ts, 0.0));
+
+        if bucket.is_empty() {
+            bot_pts.push((mid_ts, 0.0));
+            if !driver_bootstrapping {
+                drv_pts.push((mid_ts, 0.0));
+            }
             continue;
         }
+
+        let u_ch_sum: u64 = bucket.iter().map(|r| r.u_ch).sum();
+        let out_sum: u64 = bucket.iter().map(|r| r.out).sum();
         let bucket_agg = Aggregate::ingest(bucket);
-        bot_pts.push((mid_ts, bot_score(&bucket_agg, &app.baseline) as f64));
+
+        // Driver: 0 when no human input this bucket; else computed.
         if !driver_bootstrapping {
-            drv_pts.push((mid_ts, driver_score(&bucket_agg, &app.baseline) as f64));
+            let drv_val = if u_ch_sum == 0 {
+                0.0
+            } else {
+                driver_score(&bucket_agg, &app.baseline) as f64
+            };
+            drv_pts.push((mid_ts, drv_val));
+        }
+
+        // Bot: skip when human was active but bot produced nothing
+        // (undefined opinion); otherwise plot computed score.
+        if u_ch_sum > 0 && out_sum == 0 {
+            // no plot — silent bot during human activity is the one case
+            // where 0 would mislead and the score isn't defined.
+        } else {
+            bot_pts.push((mid_ts, bot_score(&bucket_agg, &app.baseline) as f64));
         }
     }
 
-    // Split each line series into runs at significant gaps so it doesn't
-    // bridge over empty calendar periods. The gap_pts dots then occupy
-    // those gaps visually.
-    let bot_runs = split_at_gaps(&bot_pts, max_gap);
-    let drv_runs = if driver_bootstrapping { Vec::new() } else { split_at_gaps(&drv_pts, max_gap) };
-
-    let mut datasets: Vec<Dataset> = Vec::new();
-    // Gap dots first so the colored metric lines paint on top wherever
-    // they overlap (lines win over dots at the same cell).
-    if !gap_pts.is_empty() {
-        datasets.push(
-            Dataset::default()
-                .name("gap")
-                .marker(symbols::Marker::Dot)
-                .graph_type(GraphType::Scatter)
-                .style(Style::default().fg(style::WHITE))
-                .data(&gap_pts),
-        );
-    }
-    for run in &bot_runs {
-        datasets.push(
-            Dataset::default()
-                .name("bot")
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(Style::default().fg(style::PINK))
-                .data(run),
-        );
-    }
-    for run in &drv_runs {
-        datasets.push(
-            Dataset::default()
-                .name("driver")
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(Style::default().fg(style::CYAN))
-                .data(run),
-        );
-    }
+    let datasets = {
+        let mut v = vec![Dataset::default()
+            .name("bot")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(style::PINK))
+            .data(&bot_pts)];
+        if !driver_bootstrapping {
+            v.push(
+                Dataset::default()
+                    .name("driver")
+                    .marker(symbols::Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(style::CYAN))
+                    .data(&drv_pts),
+            );
+        }
+        v
+    };
 
     // X-axis bounds match the effective range so the line spans the full
     // chart width — no x-axis labels passed (we paint our own below).
