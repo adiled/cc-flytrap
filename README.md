@@ -1,5 +1,8 @@
 # ccft
 
+<img width="1412" height="774" alt="Screenshot 2026-05-09 at 4 18 39 PM" src="https://github.com/user-attachments/assets/f34de8ae-ba83-4326-b7e8-06d03ca1f0bd" />
+
+
 **ccft - an agentic self improvement tool.** A streaming MITM proxy that sits between Claude Code and `api.anthropic.com`, mutates the request system prompt to your preferences, and writes a per-response token ledger — all while preserving Claude's token-by-token streaming UX byte-for-byte.
 
 Three concrete design properties:
