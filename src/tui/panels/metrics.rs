@@ -43,7 +43,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let drv = driver_score(&app.agg, &app.baseline);
     let driver_bootstrapping = driver_is_bootstrapping(&app.baseline);
     let (drv_value, drv_sub) = if driver_bootstrapping {
-        ("—".to_string(), "no u_ch yet".to_string())
+        ("—".to_string(), "type to start".to_string())
     } else {
         (drv.to_string(), vibe_label(drv).to_string())
     };

@@ -72,7 +72,7 @@ fn scores_view(a: &Aggregate, baseline: &Baseline, cov: &Coverage) {
             bold("driver"),
             grey("  —"),
             grey("—"),
-            grey("bootstrapping (need 10+ records with u_ch)")
+            grey("learning your typing baseline (need a few more typed messages)")
         );
     } else {
         println!(
