@@ -26,6 +26,20 @@ fn effective_range(app: &App) -> (f64, f64) {
     }
 }
 
+/// Deterministic per-bucket coin toss for tie-break rendering. Returns
+/// true ≈ 50% of the time across bucket indices, but stable across redraws
+/// so the chart doesn't flicker. Uses a cheap integer hash to avoid easy
+/// patterns (would happen with raw parity).
+fn bucket_coin(idx: usize) -> bool {
+    // Wang's integer hash, 32-bit. Cheap, decorrelated, deterministic.
+    let mut x = idx as u32;
+    x = x.wrapping_add(0x9e3779b9);
+    x = (x ^ (x >> 16)).wrapping_mul(0x85ebca6b);
+    x = (x ^ (x >> 13)).wrapping_mul(0xc2b2ae35);
+    x ^= x >> 16;
+    x & 1 == 1
+}
+
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let inner = style::panel(f, area, "brainrot");
 
@@ -132,6 +146,17 @@ fn chart(f: &mut Frame, area: Rect, app: &App) {
     let span = (until - since).max(1.0);
     let bucket_s = span / bucket_count as f64;
 
+    // Coin-toss tolerance: when bot and driver y-values fall within one
+    // braille sub-pixel of each other, the last-drawn dataset would
+    // completely cover the first at that cell — driver always winning
+    // would hide bot. Per-bucket coin toss decides which one gets plotted
+    // at those overlap points; the loser skips that one bucket. Toss is
+    // deterministic on the bucket index so it doesn't flicker on redraw.
+    // Each braille cell is 4 vertical sub-pixels; chart_h cells × 4 sub
+    // gives effective y resolution. y-axis is 0..100.
+    let chart_subpx_h = (area.height as f64 * 4.0).max(8.0);
+    let overlap_tol = 100.0 / chart_subpx_h;
+
     let mut by_bucket: Vec<Vec<Record>> = (0..bucket_count).map(|_| Vec::new()).collect();
     for r in &app.agg.records {
         let idx = ((r.ts - since) / bucket_s).floor() as i64;
@@ -139,62 +164,54 @@ fn chart(f: &mut Frame, area: Rect, app: &App) {
         by_bucket[clamped].push(r.clone());
     }
 
-    // Driver bootstrap: when there's no historical u_ch baseline yet, every
-    // per-bucket driver_score returns 50 by design. Skip the driver series
-    // entirely in that case so it doesn't paint a flat misleading line.
     let driver_bootstrapping = driver_is_bootstrapping(&app.baseline);
 
-    // Per-bucket plotting rule (user-defined semantics):
-    //
-    //   bucket empty                      → bot = 0, driver = 0
-    //                                       (whole system idle this slot)
-    //   bucket has records, u_ch > 0      → both computed normally
-    //   bucket has records, u_ch = 0      → driver = 0 (no human input);
-    //                                       bot computed normally
-    //   bucket has u_ch > 0 but no out    → bot = no plot (human active,
-    //                                       bot silent — edge case)
-    //
-    // Rationale: driver is a kinetics metric where absence == zero is
-    // semantically correct (no typing → 0 chars/min). Bot is a health
-    // metric over actual API responses; no responses → no opinion, but
-    // when the *whole system* is idle (bucket empty) we plot 0 because
-    // there's nothing weird about it. The "human active, bot silent"
-    // edge case rarely fires in our schema (records are API request/
-    // response pairs) but we guard for it anyway.
     let mut bot_pts: Vec<(f64, f64)> = Vec::new();
     let mut drv_pts: Vec<(f64, f64)> = Vec::new();
     for (i, bucket) in by_bucket.into_iter().enumerate() {
         let mid_ts = since + bucket_s * (i as f64 + 0.5);
 
-        if bucket.is_empty() {
-            bot_pts.push((mid_ts, 0.0));
-            if !driver_bootstrapping {
-                drv_pts.push((mid_ts, 0.0));
-            }
-            continue;
-        }
-
-        let u_ch_sum: u64 = bucket.iter().map(|r| r.u_ch).sum();
-        let out_sum: u64 = bucket.iter().map(|r| r.out).sum();
-        let bucket_agg = Aggregate::ingest(bucket);
-
-        // Driver: 0 when no human input this bucket; else computed.
-        if !driver_bootstrapping {
-            let drv_val = if u_ch_sum == 0 {
-                0.0
-            } else {
-                driver_score(&bucket_agg, &app.baseline) as f64
-            };
-            drv_pts.push((mid_ts, drv_val));
-        }
-
-        // Bot: skip when human was active but bot produced nothing
-        // (undefined opinion); otherwise plot computed score.
-        if u_ch_sum > 0 && out_sum == 0 {
-            // no plot — silent bot during human activity is the one case
-            // where 0 would mislead and the score isn't defined.
+        // Per-bucket plotting rule (see commit 6cd1a25):
+        //   empty                  → bot=0, driver=0
+        //   has records, u_ch>0    → both computed
+        //   has records, u_ch=0    → driver=0, bot computed
+        //   has u_ch>0 but out=0   → bot no plot
+        let (bot_val, drv_val): (Option<f64>, Option<f64>) = if bucket.is_empty() {
+            (Some(0.0), if driver_bootstrapping { None } else { Some(0.0) })
         } else {
-            bot_pts.push((mid_ts, bot_score(&bucket_agg, &app.baseline) as f64));
+            let u_ch_sum: u64 = bucket.iter().map(|r| r.u_ch).sum();
+            let out_sum: u64 = bucket.iter().map(|r| r.out).sum();
+            let bucket_agg = Aggregate::ingest(bucket);
+            let drv = if driver_bootstrapping {
+                None
+            } else if u_ch_sum == 0 {
+                Some(0.0)
+            } else {
+                Some(driver_score(&bucket_agg, &app.baseline) as f64)
+            };
+            let bot = if u_ch_sum > 0 && out_sum == 0 {
+                None
+            } else {
+                Some(bot_score(&bucket_agg, &app.baseline) as f64)
+            };
+            (bot, drv)
+        };
+
+        // Coin-toss tie-break: when both metrics are present and within one
+        // braille sub-pixel, only one gets plotted at this bucket so the
+        // "winner" colour shows through instead of always being driver.
+        match (bot_val, drv_val) {
+            (Some(b), Some(d)) if (b - d).abs() <= overlap_tol => {
+                if bucket_coin(i) {
+                    bot_pts.push((mid_ts, b));
+                } else {
+                    drv_pts.push((mid_ts, d));
+                }
+            }
+            (b, d) => {
+                if let Some(v) = b { bot_pts.push((mid_ts, v)); }
+                if let Some(v) = d { drv_pts.push((mid_ts, v)); }
+            }
         }
     }
 
