@@ -1,8 +1,8 @@
 # ccft
 
-<img width="1412" height="774" alt="ccft TUI" src="https://github.com/user-attachments/assets/f34de8ae-ba83-4326-b7e8-06d03ca1f0bd" />
+<img width="1412" height="788" alt="Screenshot 2026-05-10 at 4 09 02 PM" src="https://github.com/user-attachments/assets/19417efd-da43-446c-bc67-b08c053f65f6" />
 
-**ccft — an agentic self improvement tool.** A streaming flytrap that sits between Claude Code and `api.anthropic.com`, mutates the request system prompt to your preferences, and writes a per-response token ledger — all while preserving Claude's token-by-token streaming UX byte-for-byte.
+**ccft: an agentic self improvement tool.** A streaming flytrap that sits between Claude Code and `api.anthropic.com`, mutates the request system prompt to your preferences, and writes a per-response token ledger — all while preserving Claude's token-by-token streaming UX byte-for-byte.
 
 Three design properties:
 
