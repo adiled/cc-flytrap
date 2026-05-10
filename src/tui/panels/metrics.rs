@@ -14,7 +14,8 @@
 //! energized rail treatment as the larger panels.
 
 use crate::brainrot::aggregate::{
-    bot_score, driver_is_bootstrapping, driver_score, vibe_label, Aggregate, Baseline,
+    bot_score, compute_signal, driver_is_bootstrapping, driver_score, vibe_label, Aggregate,
+    Baseline,
 };
 use crate::ledger_read::{percentile, Record};
 use crate::tui::style;
@@ -96,12 +97,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         &series.p99, // sparkline still shows p99-per-bucket for tail awareness
         style::GOLD,
     );
+    let signal = compute_signal(&app.agg, &app.baseline);
     tile(
         f,
         cells[3],
-        "CACHE",
-        &format!("{:.0}%", cache_pct),
-        "offload",
+        "SIGNAL",
+        signal.phrase,
+        &signal.value,
         &series.cache,
         style::LIME,
     );

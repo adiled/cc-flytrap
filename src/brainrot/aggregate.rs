@@ -268,6 +268,16 @@ pub struct Baseline {
     pub user_chars_per_min_mad: f64,
     pub n_records_with_u_ch: u64,
 
+    // Signal metrics — distributions of cc-based ratios across days.
+    // Used by `compute_signal` to z-score the current window and surface
+    // a phrase describing the dominant deviation.
+    pub investigation_med: f64, // cc / out per day
+    pub investigation_mad: f64,
+    pub amplification_med: f64, // cc / u_ch per day (when u_ch > 0)
+    pub amplification_mad: f64,
+    pub throughput_med: f64,    // cc / active_minutes per day
+    pub throughput_mad: f64,
+
     // Latency-tier percentiles (for dynamic word labels). Computed from
     // baseline ms_per_token distribution so each user gets thresholds
     // calibrated to their own normal.
@@ -405,6 +415,46 @@ impl Baseline {
         let user_chars_per_min_med = median(&daily_rates);
         let user_chars_per_min_mad = mad(&daily_rates, user_chars_per_min_med);
 
+        // Signal-tile distributions: per-day cc-based ratios.
+        // Group ALL records (not just u_ch>0 ones) by date, then per day
+        // compute cc/out, cc/u_ch (when u_ch>0), cc/active_min.
+        let mut by_date_all: HashMap<(i32, u8, u8), Vec<&Record>> = HashMap::new();
+        for r in records {
+            let dt = time::OffsetDateTime::from_unix_timestamp(r.ts as i64)
+                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+                .to_offset(local_offset);
+            by_date_all
+                .entry((dt.year(), u8::from(dt.month()), dt.day()))
+                .or_default()
+                .push(r);
+        }
+        let mut investigations: Vec<f64> = Vec::new();
+        let mut amplifications: Vec<f64> = Vec::new();
+        let mut throughputs: Vec<f64> = Vec::new();
+        for (_date, recs) in &by_date_all {
+            if recs.len() < 5 { continue; } // skip days with too little signal
+            let cc_sum: u64 = recs.iter().map(|r| r.cc).sum();
+            let out_sum: u64 = recs.iter().map(|r| r.out).sum();
+            let u_ch_sum: u64 = recs.iter().map(|r| r.u_ch).sum();
+            if cc_sum == 0 { continue; }
+            if out_sum > 0 {
+                investigations.push(cc_sum as f64 / out_sum as f64);
+            }
+            if u_ch_sum > 0 {
+                amplifications.push(cc_sum as f64 / u_ch_sum as f64);
+            }
+            let first = recs.iter().map(|r| r.ts).fold(f64::INFINITY, f64::min);
+            let last = recs.iter().map(|r| r.ts).fold(f64::NEG_INFINITY, f64::max);
+            let span_min = ((last - first) / 60.0).max(1.0);
+            throughputs.push(cc_sum as f64 / span_min);
+        }
+        let investigation_med = median(&investigations);
+        let investigation_mad = mad(&investigations, investigation_med);
+        let amplification_med = median(&amplifications);
+        let amplification_mad = mad(&amplifications, amplification_med);
+        let throughput_med = median(&throughputs);
+        let throughput_mad = mad(&throughputs, throughput_med);
+
         // Latency-tier percentiles (lat in ms across all records)
         let mut lats: Vec<f64> = records.iter().map(|r| r.lat as f64).collect();
         lats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -433,6 +483,12 @@ impl Baseline {
             user_chars_per_min_med,
             user_chars_per_min_mad,
             n_records_with_u_ch,
+            investigation_med,
+            investigation_mad,
+            amplification_med,
+            amplification_mad,
+            throughput_med,
+            throughput_mad,
             lat_p20,
             lat_p40,
             lat_p60,
@@ -692,6 +748,115 @@ pub struct ScoreBreakdown {
     pub b_cache_drag: f64,
     pub b_raw: f64,
     pub b_shrunk: f64,
+}
+
+// ─── Signal heuristic ────────────────────────────────────────────────────────
+//
+// Computes three cc-based ratios for the current window, z-scores each
+// against per-day baseline distributions, picks the dominant deviation
+// (max |z|), and maps to a phrase describing what the agent is doing
+// right now.
+//
+//   investigation = cc / out          (reading vs writing density)
+//   amplification = cc / u_ch         (each typed char → tokens loaded)
+//   throughput    = cc / active_min   (raw new-context rate)
+//
+// Returns a `Signal` with the dominant phrase + value. When no metric
+// crosses the 1σ threshold, returns "steady".
+
+#[derive(Debug, Clone)]
+pub struct Signal {
+    pub phrase: &'static str,
+    /// Short human-readable representation of the dominant ratio's value.
+    pub value: String,
+    /// Dominant z-score (signed).
+    pub z: f64,
+}
+
+pub fn compute_signal(a: &Aggregate, baseline: &Baseline) -> Signal {
+    let cc_sum: u64 = a.records.iter().map(|r| r.cc).sum();
+    let out_sum: u64 = a.records.iter().map(|r| r.out).sum();
+    let u_ch_sum: u64 = a.records.iter().map(|r| r.u_ch).sum();
+    let span_min = match (a.first_ts, a.last_ts) {
+        (Some(f), Some(l)) if l > f => ((l - f) / 60.0).max(1.0),
+        _ => 1.0,
+    };
+
+    if a.records.is_empty() || cc_sum == 0 {
+        return Signal { phrase: "—", value: "no signal".into(), z: 0.0 };
+    }
+
+    // Each candidate: (name, cur, base_med, base_mad, mad_floor, value-fmt-fn)
+    let inv_cur = if out_sum > 0 { Some(cc_sum as f64 / out_sum as f64) } else { None };
+    let amp_cur = if u_ch_sum > 0 { Some(cc_sum as f64 / u_ch_sum as f64) } else { None };
+    let thr_cur = Some(cc_sum as f64 / span_min);
+
+    // Each candidate: (cur, med, mad, mad_floor, low_phrase, high_phrase, value-fmt)
+    let mut candidates: Vec<(f64, f64, f64, f64, &'static str, &'static str, String)> = Vec::new();
+    if let Some(c) = inv_cur {
+        if baseline.investigation_med > 0.0 {
+            candidates.push((
+                c,
+                baseline.investigation_med,
+                baseline.investigation_mad,
+                (baseline.investigation_med * 0.20).max(0.05),
+                "synthesis",
+                "deep dive",
+                format!("{:.2}", c),
+            ));
+        }
+    }
+    if let Some(c) = amp_cur {
+        if baseline.amplification_med > 0.0 {
+            candidates.push((
+                c,
+                baseline.amplification_med,
+                baseline.amplification_mad,
+                (baseline.amplification_med * 0.20).max(0.5),
+                "manual",
+                "amplified",
+                format!("{:.0}×", c),
+            ));
+        }
+    }
+    if let Some(c) = thr_cur {
+        if baseline.throughput_med > 0.0 {
+            candidates.push((
+                c,
+                baseline.throughput_med,
+                baseline.throughput_mad,
+                (baseline.throughput_med * 0.20).max(10.0),
+                "context calm",
+                "context surge",
+                format!("{:.0}/m", c),
+            ));
+        }
+    }
+
+    if candidates.is_empty() {
+        return Signal { phrase: "—", value: "warming up".into(), z: 0.0 };
+    }
+
+    // Compute z for each (using max(baseline_mad, mad_floor) as denominator),
+    // pick max |z|.
+    let mut best: Option<(f64, &'static str, &'static str, String)> = None;
+    for (cur, med, mad, floor, low, high, fmt) in &candidates {
+        let denom = mad.max(*floor);
+        let z = if denom > 1e-9 { (cur - med) / denom } else { 0.0 };
+        let cur_best_abs = best.as_ref().map(|(z, _, _, _)| z.abs()).unwrap_or(0.0);
+        if z.abs() > cur_best_abs {
+            best = Some((z, *low, *high, fmt.clone()));
+        }
+    }
+    let (z, low, high, value) = best.unwrap();
+    let phrase = if z.abs() < 1.0 {
+        "steady"
+    } else if z > 0.0 {
+        high
+    } else {
+        low
+    };
+    Signal { phrase, value, z }
 }
 
 // ─── Labels ──────────────────────────────────────────────────────────────────

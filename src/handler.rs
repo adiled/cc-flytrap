@@ -115,7 +115,7 @@ fn extract_user_message_chars(body_bytes: &[u8]) -> (u64, u64) {
 
     // content can be a string (older form) or an array of content blocks.
     if let Some(s) = content.as_str() {
-        return (s.chars().count() as u64, 0);
+        return (count_user_text(s), 0);
     }
     let Some(blocks) = content.as_array() else { return (0, 0) };
 
@@ -126,7 +126,7 @@ fn extract_user_message_chars(body_bytes: &[u8]) -> (u64, u64) {
         match kind {
             "text" => {
                 if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
-                    text += t.chars().count() as u64;
+                    text += count_user_text(t);
                 }
             }
             "tool_result" => {
@@ -148,6 +148,65 @@ fn extract_user_message_chars(body_bytes: &[u8]) -> (u64, u64) {
         }
     }
     (text, tool)
+}
+
+/// Count chars of a user-text block, EXCLUDING content that didn't come
+/// from the user actually typing:
+///   * `<system-*>...</system-*>` blocks (Claude Code hooks inject these
+///     into the user message — system-reminder, system-override, etc.)
+///   * Conversation-continuation summaries — when a session runs out of
+///     context, Claude Code starts the next one with a 10-20k-char
+///     auto-generated summary in a "user" message. The text is
+///     unmistakable: it always opens with "This session is being
+///     continued from a previous conversation".
+///
+/// Both patterns inflate the driver-kinetics signal by hundreds-to-tens-
+/// of-thousands of chars per turn that the user never actually typed.
+fn count_user_text(s: &str) -> u64 {
+    if s.trim_start().starts_with("This session is being continued from a previous conversation") {
+        return 0;
+    }
+    let stripped = strip_system_blocks(s);
+    stripped.chars().count() as u64
+}
+
+/// Strip every `<system-XXX>...</system-XXX>` block from the input text.
+/// Tolerant of nesting/unclosed by simple sequential scan: find an opening
+/// tag, find the matching closing tag, drop the whole span. Anything we
+/// can't pair just stays in.
+fn strip_system_blocks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        let Some(open_at) = rest.find("<system-") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..open_at]);
+        // Find tag name end (`>` after the opening `<system-`)
+        let after_open = &rest[open_at + 1..]; // strip the `<`
+        let Some(name_end) = after_open.find('>') else {
+            // Malformed; bail and keep the rest as-is.
+            out.push_str(&rest[open_at..]);
+            break;
+        };
+        let tag_name = &after_open[..name_end]; // e.g. "system-reminder"
+        // Look for matching closing tag.
+        let close_pat = format!("</{}>", tag_name);
+        let after_tag = &after_open[name_end + 1..];
+        match after_tag.find(&close_pat) {
+            Some(close_at) => {
+                // Skip past the closing tag.
+                rest = &after_tag[close_at + close_pat.len()..];
+            }
+            None => {
+                // Unclosed; bail and keep the rest as-is.
+                out.push_str(&rest[open_at..]);
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Mutate Anthropic request body. Returns a new body if mutated, or `None`.

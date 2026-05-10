@@ -343,10 +343,14 @@ fn walk_jsonl(dir: &Path, f: &mut dyn FnMut(&Path)) {
 /// same message structure as the API request body; we re-implement here
 /// rather than share to keep the live request hot path free of any shared
 /// parsing module.
+///
+/// As of the system-reminder strip fix: `<system-*>...</system-*>` blocks
+/// injected by Claude Code's hooks are excluded from u_ch counts so the
+/// driver kinetics signal reflects what the user actually typed.
 fn count_user_chars(content: Option<&Value>) -> (u64, u64) {
     let Some(c) = content else { return (0, 0) };
     if let Some(s) = c.as_str() {
-        return (s.chars().count() as u64, 0);
+        return (count_user_text(s), 0);
     }
     let Some(blocks) = c.as_array() else { return (0, 0) };
     let mut text = 0u64;
@@ -356,7 +360,7 @@ fn count_user_chars(content: Option<&Value>) -> (u64, u64) {
         match kind {
             "text" => {
                 if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
-                    text += t.chars().count() as u64;
+                    text += count_user_text(t);
                 }
             }
             "tool_result" => {
@@ -376,6 +380,43 @@ fn count_user_chars(content: Option<&Value>) -> (u64, u64) {
         }
     }
     (text, tool)
+}
+
+fn count_user_text(s: &str) -> u64 {
+    if s.trim_start().starts_with("This session is being continued from a previous conversation") {
+        return 0;
+    }
+    strip_system_blocks(s).chars().count() as u64
+}
+
+fn strip_system_blocks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        let Some(open_at) = rest.find("<system-") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..open_at]);
+        let after_open = &rest[open_at + 1..];
+        let Some(name_end) = after_open.find('>') else {
+            out.push_str(&rest[open_at..]);
+            break;
+        };
+        let tag_name = &after_open[..name_end];
+        let close_pat = format!("</{}>", tag_name);
+        let after_tag = &after_open[name_end + 1..];
+        match after_tag.find(&close_pat) {
+            Some(close_at) => {
+                rest = &after_tag[close_at + close_pat.len()..];
+            }
+            None => {
+                out.push_str(&rest[open_at..]);
+                break;
+            }
+        }
+    }
+    out
 }
 
 fn synthesize_record_json(t: &Turn) -> String {
