@@ -17,7 +17,9 @@ pub fn run(spec: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("baseline n={}  records_with_u_ch={}",
         baseline.n_records, baseline.n_records_with_u_ch);
     println!("  driver:");
-    println!("    user_chars_per_min   med={:.2}  mad={:.2}",
+    println!("    user_chars_per_min   mean={:.2}  std={:.2}  (winsorized 5/95)",
+        baseline.user_chars_per_min_mean, baseline.user_chars_per_min_std);
+    println!("                         med={:.2}   mad={:.2}  (robust, for ref)",
         baseline.user_chars_per_min_med, baseline.user_chars_per_min_mad);
     println!("  bot:");
     println!("    out                  med={:.0}  mad={:.0}", baseline.out_med, baseline.out_mad);
@@ -52,7 +54,7 @@ pub fn run(spec: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("  records_with_u_ch    {} / {}", bd.d_with_u_ch, bd.n);
     println!("  total u_ch in window {}", bd.d_total_u_ch);
     println!("  current  chars/min   {:.2}", bd.d_chars_per_min);
-    println!("  baseline chars/min   {:.2}  (mad={:.2})", bd.d_baseline_cpm, bd.d_baseline_mad);
+    println!("  baseline chars/min   {:.2}  (std={:.2})", bd.d_baseline_cpm, bd.d_baseline_mad);
     println!("  z                    {:+.2}", bd.d_z);
     println!("  raw                  {:>6.2}", bd.d_raw);
     println!("  shrunk               {:>6.2}  → {} / 100",

@@ -225,6 +225,47 @@ fn logistic_score(z: f64, scale: f64) -> f64 {
     50.0 + 50.0 * (z / scale).tanh()
 }
 
+/// Per-record cap on `u_ch`. Anything beyond this is treated as the cap —
+/// genuine user typing per single API request never exceeds a few thousand
+/// chars; values in the tens-of-thousands are auto-injected content (large
+/// CLAUDE.md, slash-command expansion, IDE context, etc.) we haven't
+/// strip-classified yet. Defense in depth alongside the strip rules in
+/// handler.rs::count_user_text.
+const RECORD_U_CH_CAP: u64 = 5000;
+
+/// Winsorize a slice in place: clip every value outside the [p_low, p_high]
+/// percentile band to the band edges. p_low / p_high in 0.0..=1.0. Returns
+/// the band edges actually used.
+fn winsorize(xs: &mut [f64], p_low: f64, p_high: f64) -> (f64, f64) {
+    if xs.len() < 4 {
+        return (xs.iter().cloned().fold(f64::INFINITY, f64::min),
+                xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+    }
+    let mut sorted: Vec<f64> = xs.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let lo_idx = ((sorted.len() as f64 * p_low) as usize).min(sorted.len() - 1);
+    let hi_idx = ((sorted.len() as f64 * p_high) as usize).min(sorted.len() - 1);
+    let lo = sorted[lo_idx];
+    let hi = sorted[hi_idx];
+    for v in xs.iter_mut() {
+        *v = v.clamp(lo, hi);
+    }
+    (lo, hi)
+}
+
+/// Sample mean. Returns 0 on empty input.
+fn mean(xs: &[f64]) -> f64 {
+    if xs.is_empty() { return 0.0; }
+    xs.iter().sum::<f64>() / xs.len() as f64
+}
+
+/// Sample standard deviation (n-1 denominator). Returns 0 when n<2.
+fn stddev(xs: &[f64], m: f64) -> f64 {
+    if xs.len() < 2 { return 0.0; }
+    let var = xs.iter().map(|v| (v - m).powi(2)).sum::<f64>() / (xs.len() - 1) as f64;
+    var.sqrt()
+}
+
 // ─── Baseline: the user's historical fingerprint ─────────────────────────────
 //
 // Computed once from the full ledger (or whatever set of records the caller
@@ -259,11 +300,17 @@ pub struct Baseline {
     // Window-rate scalar (sessions/hour over the entire baseline span)
     pub sessions_per_hour: f64,
 
-    // Driver kinetics: user-typed chars per minute, computed as a robust
-    // distribution over per-record chars/min slots. Only populated from
-    // records that have the new u_ch field (post-schema bump); older
-    // records contribute u_ch=0, which we filter out to avoid biasing
-    // the baseline downward.
+    // Driver kinetics: user-typed chars per minute. Computed as winsorized
+    // mean + winsorized std-dev across per-day rates so a single outlier
+    // day (e.g., one massive paste, one degenerate auto-injected block we
+    // failed to strip) can't poison the comparison anchor or the spread.
+    // u_ch values are also clamped per-record at RECORD_U_CH_CAP before
+    // aggregation (defense in depth — a 250k-char "user message" is
+    // structurally not user input).
+    pub user_chars_per_min_mean: f64,
+    pub user_chars_per_min_std: f64,
+    /// Kept for back-compat / debug-scores display; same data, robust
+    /// statistics for the same per-day distribution.
     pub user_chars_per_min_med: f64,
     pub user_chars_per_min_mad: f64,
     pub n_records_with_u_ch: u64,
@@ -409,9 +456,19 @@ impl Baseline {
             let first = recs.iter().map(|r| r.ts).fold(f64::INFINITY, f64::min);
             let last = recs.iter().map(|r| r.ts).fold(f64::NEG_INFINITY, f64::max);
             let span_min = ((last - first) / 60.0).max(1.0);
-            let total_u_ch: u64 = recs.iter().map(|r| r.u_ch).sum();
+            // Clamp per-record u_ch — single records of 50k+ chars are
+            // structurally not user typing, regardless of source.
+            let total_u_ch: u64 = recs.iter().map(|r| r.u_ch.min(RECORD_U_CH_CAP)).sum();
             daily_rates.push(total_u_ch as f64 / span_min);
         }
+        // Winsorize daily rates at p5/p95 before computing mean+std so a
+        // single anomalous day can't blow up the comparison anchor or
+        // inflate the standard deviation.
+        let mut winsorized = daily_rates.clone();
+        winsorize(&mut winsorized, 0.05, 0.95);
+        let user_chars_per_min_mean = mean(&winsorized);
+        let user_chars_per_min_std = stddev(&winsorized, user_chars_per_min_mean);
+        // Robust statistics kept around for debug-scores readout / future use.
         let user_chars_per_min_med = median(&daily_rates);
         let user_chars_per_min_mad = mad(&daily_rates, user_chars_per_min_med);
 
@@ -480,6 +537,8 @@ impl Baseline {
             gap_cv_med,
             gap_cv_mad,
             sessions_per_hour,
+            user_chars_per_min_mean,
+            user_chars_per_min_std,
             user_chars_per_min_med,
             user_chars_per_min_mad,
             n_records_with_u_ch,
@@ -549,10 +608,13 @@ pub fn driver_is_bootstrapping(baseline: &Baseline) -> bool {
 }
 
 fn driver_chars_per_min(a: &Aggregate) -> Option<f64> {
-    // Sum u_ch within the window, divide by active span. This is the
-    // cumulative kinetic — parallel sessions naturally add up because we
-    // sum the chars regardless of which session contributed them.
-    let total_u_ch: u64 = a.records.iter().map(|r| r.u_ch).sum();
+    // Sum u_ch within the window, divide by active span. Per-record u_ch
+    // is clamped to RECORD_U_CH_CAP so a single anomalous record can't
+    // dominate the rate (humans don't type tens-of-thousands of chars in
+    // one API request — those are auto-injected blocks we haven't yet
+    // strip-classified). Parallel sessions stack additively because we
+    // sum across all records regardless of session.
+    let total_u_ch: u64 = a.records.iter().map(|r| r.u_ch.min(RECORD_U_CH_CAP)).sum();
     let with_u_ch: u64 = a.records.iter().filter(|r| r.u_ch > 0).count() as u64;
     if with_u_ch < MIN_UCH_RECORDS_WINDOW {
         return None;
@@ -596,10 +658,18 @@ pub fn driver_score(a: &Aggregate, baseline: &Baseline) -> u32 {
     let Some(cur_cpm) = driver_chars_per_min(a) else {
         return 50;
     };
-    // Floor MAD so a too-tight baseline can't make z explode.
-    let mad_floor = (baseline.user_chars_per_min_med * 0.20).max(5.0);
-    let mad = baseline.user_chars_per_min_mad.max(mad_floor);
-    let z = robust_z(cur_cpm, baseline.user_chars_per_min_med, mad);
+    // Use winsorized mean + std for the comparison. Std-floor at 20% of
+    // mean (or 5 c/min absolute) keeps z bounded when the user's history
+    // is unusually consistent — without it a very tight baseline lets any
+    // small deviation saturate. Logistic scale = 1.5 so z=±2 ≈ score 90/10
+    // and z=±4 saturates near 0/100.
+    let std_floor = (baseline.user_chars_per_min_mean * 0.20).max(5.0);
+    let std = baseline.user_chars_per_min_std.max(std_floor);
+    let z = if std > 1e-9 {
+        (cur_cpm - baseline.user_chars_per_min_mean) / std
+    } else {
+        0.0
+    };
     let raw = logistic_score(z, 1.5);
     let shrunk = shrink(raw, confidence(a.n));
     shrunk.round().clamp(0.0, 100.0) as u32
@@ -694,14 +764,14 @@ pub fn score_breakdown(
 ) -> ScoreBreakdown {
     let conf = confidence(a.n);
 
-    // Driver: kinetic chars/min vs baseline median.
-    let total_u_ch: u64 = a.records.iter().map(|r| r.u_ch).sum();
+    // Driver: kinetic chars/min vs baseline mean (winsorized).
+    let total_u_ch: u64 = a.records.iter().map(|r| r.u_ch.min(RECORD_U_CH_CAP)).sum();
     let with_u_ch: u64 = a.records.iter().filter(|r| r.u_ch > 0).count() as u64;
     let cur_cpm = driver_chars_per_min(a).unwrap_or(0.0);
-    let mad_floor = (baseline.user_chars_per_min_med * 0.20).max(5.0);
-    let used_mad = baseline.user_chars_per_min_mad.max(mad_floor);
-    let driver_z = if used_mad > 1e-9 {
-        (cur_cpm - baseline.user_chars_per_min_med) / used_mad
+    let std_floor = (baseline.user_chars_per_min_mean * 0.20).max(5.0);
+    let used_std = baseline.user_chars_per_min_std.max(std_floor);
+    let driver_z = if used_std > 1e-9 {
+        (cur_cpm - baseline.user_chars_per_min_mean) / used_std
     } else {
         0.0
     };
@@ -721,8 +791,8 @@ pub fn score_breakdown(
         d_total_u_ch: total_u_ch,
         d_with_u_ch: with_u_ch,
         d_chars_per_min: cur_cpm,
-        d_baseline_cpm: baseline.user_chars_per_min_med,
-        d_baseline_mad: used_mad,
+        d_baseline_cpm: baseline.user_chars_per_min_mean,
+        d_baseline_mad: used_std,
         d_z: driver_z,
         d_raw, d_shrunk,
         b_brevity, b_stalling, b_wandering, b_cache_drag,

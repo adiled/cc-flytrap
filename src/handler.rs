@@ -121,12 +121,15 @@ fn extract_user_message_chars(body_bytes: &[u8]) -> (u64, u64) {
 
     let mut text = 0u64;
     let mut tool = 0u64;
+    let mut text_block_sizes: Vec<usize> = Vec::new();
     for b in blocks {
         let kind = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match kind {
             "text" => {
                 if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
-                    text += count_user_text(t);
+                    let counted = count_user_text(t);
+                    text += counted;
+                    text_block_sizes.push(t.chars().count());
                 }
             }
             "tool_result" => {
@@ -145,6 +148,26 @@ fn extract_user_message_chars(body_bytes: &[u8]) -> (u64, u64) {
                 }
             }
             _ => {}
+        }
+    }
+    // Debug: when the result is suspiciously large for "user text" (a human
+    // can't type 5000 chars/request), dump the block structure so we can
+    // see what's being counted. Temporary.
+    if text > 5000 {
+        let n_blocks = blocks.len();
+        warn!(
+            "[ccft][uch-big] text={} (raw_blocks={}, text_block_sizes={:?})",
+            text, n_blocks, text_block_sizes
+        );
+        // Also dump first 500 chars of the last text block we counted
+        for b in blocks.iter().rev() {
+            if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
+                    let preview: String = t.chars().take(300).collect();
+                    warn!("[ccft][uch-big] last-text-preview: {:?}", preview);
+                    break;
+                }
+            }
         }
     }
     (text, tool)
