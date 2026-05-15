@@ -338,6 +338,7 @@ impl HttpHandler for CcftHandler {
 
         let session_id = session::extract(&parts.headers, Some(&collected));
         let (user_text_chars, tool_result_chars) = extract_user_message_chars(&collected);
+
         let new_body = mutate_messages_body(&collected, &self.cfg).unwrap_or(collected);
 
         let _ = self.seq.fetch_add(1, Ordering::Relaxed);
@@ -363,6 +364,17 @@ impl HttpHandler for CcftHandler {
             .headers_mut()
             .insert(hyper::header::CONTENT_LENGTH, new_body.len().into());
         new_req.headers_mut().remove(hyper::header::CONTENT_ENCODING);
+
+        if self.cfg.highway_enabled {
+            if let Some(ua) = new_req.headers_mut().get("user-agent") {
+                if let Ok(ua_str) = ua.to_str() {
+                    if ua_str.contains("sdk-cli") {
+                        let new_ua = ua_str.replace("sdk-cli", "cli");
+                        new_req.headers_mut().insert("user-agent", new_ua.parse().unwrap());
+                    }
+                }
+            }
+        }
 
         new_req.into()
     }

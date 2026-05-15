@@ -22,6 +22,7 @@ pub struct Config {
     pub system_override: String,
     pub pain_enabled: bool,
     pub ledger_enabled: bool,
+    pub highway_enabled: bool,
 }
 
 impl Default for Config {
@@ -32,6 +33,7 @@ impl Default for Config {
             system_override: String::new(),
             pain_enabled: false,
             ledger_enabled: true,
+            highway_enabled: true,
         }
     }
 }
@@ -85,14 +87,18 @@ impl Config {
         if let Some(b) = parsed.get("ledger").and_then(Value::as_bool) {
             cfg.ledger_enabled = b;
         }
+        if let Some(b) = parsed.get("highway").and_then(Value::as_bool) {
+            cfg.highway_enabled = b;
+        }
 
         info!(
-            "[ccft] config loaded ({}): host={} port={} pain={} ledger={} override={}chars",
+            "[ccft] config loaded ({}): host={} port={} pain={} ledger={} highway={} override={}chars",
             path.display(),
             cfg.host,
             cfg.port,
             cfg.pain_enabled,
             cfg.ledger_enabled,
+            cfg.highway_enabled,
             cfg.system_override.len(),
         );
         cfg
