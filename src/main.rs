@@ -42,7 +42,14 @@ enum Cmd {
     /// Run the flytrap in the foreground with the dev config (port 7179, isolated ledger).
     Dev,
     /// Install: copy this binary, generate CA, write launchd plist, bootstrap.
-    Install,
+    Install {
+        /// Reverse-DNS-style identifier for the installed service unit
+        /// (`<label>.plist` on macOS, `<label>.service` on Linux). Defaults
+        /// to `com.ccft`. Persisted to config so subsequent `ccft start /
+        /// stop / restart / uninstall` find the same unit.
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// Uninstall: bootout, remove plist + installed binary. Keeps CA + ledger.
     Uninstall,
     /// Show whether ccft is installed, loaded, and bound.
@@ -152,7 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             run_flytrap(cfg)
         }
-        Cmd::Install => install::install(),
+        Cmd::Install { label } => install::install(label),
         Cmd::Uninstall => install::uninstall(),
         Cmd::Status => {
             lifecycle::print_status(&Config::load());
@@ -220,11 +227,12 @@ fn tail_logs(n: usize) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     {
         use std::process::Command;
+        let label = service::label();
         let status = Command::new("journalctl")
             .args([
                 "--user",
                 "-u",
-                service::LABEL,
+                &label,
                 "-n",
                 &n.to_string(),
                 "--no-pager",

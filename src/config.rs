@@ -6,7 +6,8 @@
 //!       "port":            7178,
 //!       "system_override": "",
 //!       "pain":            false,
-//!       "ledger":          true
+//!       "ledger":          true,
+//!       "service_label":   "com.ccft"
 //!     }
 //!
 //! Missing → defaults. Malformed → log + defaults.
@@ -14,6 +15,10 @@
 use serde_json::Value;
 use std::path::PathBuf;
 use tracing::*;
+
+/// Default reverse-DNS label used by the launchd plist / systemd unit
+/// when the user hasn't overridden it via config or env.
+pub const DEFAULT_SERVICE_LABEL: &str = "com.ccft";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -23,6 +28,11 @@ pub struct Config {
     pub pain_enabled: bool,
     pub ledger_enabled: bool,
     pub highway_enabled: bool,
+    /// Reverse-DNS-style identifier used for the user-mode service unit:
+    /// `<label>.plist` on macOS, `<label>.service` on Linux. Defaults to
+    /// `com.ccft`. Override per-install via `ccft install --label …` or
+    /// the `CCFT_LABEL` env var.
+    pub service_label: String,
 }
 
 impl Default for Config {
@@ -34,6 +44,7 @@ impl Default for Config {
             pain_enabled: false,
             ledger_enabled: true,
             highway_enabled: true,
+            service_label: DEFAULT_SERVICE_LABEL.into(),
         }
     }
 }
@@ -90,15 +101,21 @@ impl Config {
         if let Some(b) = parsed.get("highway").and_then(Value::as_bool) {
             cfg.highway_enabled = b;
         }
+        if let Some(s) = parsed.get("service_label").and_then(Value::as_str) {
+            if !s.trim().is_empty() {
+                cfg.service_label = s.trim().to_string();
+            }
+        }
 
         info!(
-            "[ccft] config loaded ({}): host={} port={} pain={} ledger={} highway={} override={}chars",
+            "[ccft] config loaded ({}): host={} port={} pain={} ledger={} highway={} label={} override={}chars",
             path.display(),
             cfg.host,
             cfg.port,
             cfg.pain_enabled,
             cfg.ledger_enabled,
             cfg.highway_enabled,
+            cfg.service_label,
             cfg.system_override.len(),
         );
         cfg

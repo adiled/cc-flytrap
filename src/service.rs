@@ -3,17 +3,36 @@
 //! Wraps each platform's "run this binary at login, restart on exit" mechanism
 //! behind one API:
 //!
-//!   - macOS:   launchd (~/Library/LaunchAgents/com.ccft.plist + launchctl)
-//!   - Linux:   systemd-user (~/.config/systemd/user/com.ccft.service + systemctl --user)
+//!   - macOS:   launchd (~/Library/LaunchAgents/<label>.plist + launchctl)
+//!   - Linux:   systemd-user (~/.config/systemd/user/<label>.service + systemctl --user)
 //!   - Windows: not implemented — install copies the binary; service mode is
 //!              a no-op (run `ccft run` manually or wrap with NSSM/sc.exe).
 //!
-//! The label `com.ccft` is the same across platforms so messages / logs read
-//! consistently.
+//! The `<label>` defaults to `com.ccft` but can be overridden per install
+//! with `ccft install --label com.mycompany.proxy` (persisted to config) or
+//! at runtime via the `CCFT_LABEL` env var. The same label is used across
+//! platforms so messages / logs read consistently.
 
+use crate::config::Config;
 use std::path::{Path, PathBuf};
 
-pub const LABEL: &str = "com.ccft";
+/// Resolve the service label to use right now. Order of precedence:
+///   1. `CCFT_LABEL` env var (testing / one-off override)
+///   2. `service_label` from the loaded config
+///   3. `DEFAULT_SERVICE_LABEL` ("com.ccft")
+pub fn label() -> String {
+    if let Some(v) = std::env::var_os("CCFT_LABEL") {
+        let s = v.to_string_lossy().trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    Config::load().service_label
+}
+
+/// Human-readable name kept for log/status messages where context is the
+/// installed service in general rather than a specific label.
+pub const PRODUCT_NAME: &str = "ccft";
 
 /// Where the unit/plist file lives on this platform.
 pub fn unit_path() -> PathBuf {
@@ -80,7 +99,7 @@ mod platform {
         paths::root()
             .join("Library")
             .join("LaunchAgents")
-            .join(format!("{}.plist", LABEL))
+            .join(format!("{}.plist", super::label()))
     }
 
     fn unit_dir() -> PathBuf {
@@ -108,7 +127,7 @@ mod platform {
 </dict>
 </plist>
 "#,
-            label = LABEL,
+            label = super::label(),
             bin = bin.display(),
             log = log.display(),
         );
@@ -144,7 +163,7 @@ mod platform {
     }
 
     pub fn kickstart() -> Result<(), Box<dyn std::error::Error>> {
-        let target = format!("{}/{}", launchctl_user_target(), LABEL);
+        let target = format!("{}/{}", launchctl_user_target(), super::label());
         let status = Command::new("launchctl")
             .args(["kickstart", "-k", &target])
             .status()?;
@@ -155,7 +174,7 @@ mod platform {
     }
 
     pub fn bootout() -> Result<(), Box<dyn std::error::Error>> {
-        let target = format!("{}/{}", launchctl_user_target(), LABEL);
+        let target = format!("{}/{}", launchctl_user_target(), super::label());
         // Idempotent: silence stderr ("Boot-out failed: 3: No such process").
         let _ = Command::new("launchctl")
             .args(["bootout", &target])
@@ -169,7 +188,7 @@ mod platform {
         if paths::is_isolated() {
             return unit_path().exists() && paths::install_bin().exists();
         }
-        let target = format!("{}/{}", launchctl_user_target(), LABEL);
+        let target = format!("{}/{}", launchctl_user_target(), super::label());
         Command::new("launchctl")
             .args(["print", &target])
             .output()
@@ -206,7 +225,7 @@ mod platform {
             .join(".config")
             .join("systemd")
             .join("user")
-            .join(format!("{}.service", LABEL))
+            .join(format!("{}.service", super::label()))
     }
 
     fn unit_dir() -> PathBuf {
@@ -242,8 +261,9 @@ WantedBy=default.target
         let _ = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .status();
+        let label = super::label();
         let status = Command::new("systemctl")
-            .args(["--user", "enable", "--now", LABEL])
+            .args(["--user", "enable", "--now", &label])
             .status()?;
         if !status.success() {
             return Err(format!("systemctl --user enable failed: {}", status).into());
@@ -253,8 +273,9 @@ WantedBy=default.target
 
     pub fn unregister() -> Result<(), Box<dyn std::error::Error>> {
         if !paths::is_isolated() {
+            let label = super::label();
             let _ = Command::new("systemctl")
-                .args(["--user", "disable", "--now", LABEL])
+                .args(["--user", "disable", "--now", &label])
                 .stderr(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .status();
@@ -271,8 +292,9 @@ WantedBy=default.target
     }
 
     pub fn kickstart() -> Result<(), Box<dyn std::error::Error>> {
+        let label = super::label();
         let status = Command::new("systemctl")
-            .args(["--user", "restart", LABEL])
+            .args(["--user", "restart", &label])
             .status()?;
         if !status.success() {
             return Err(format!("systemctl --user restart failed: {}", status).into());
@@ -281,8 +303,9 @@ WantedBy=default.target
     }
 
     pub fn bootout() -> Result<(), Box<dyn std::error::Error>> {
+        let label = super::label();
         let _ = Command::new("systemctl")
-            .args(["--user", "stop", LABEL])
+            .args(["--user", "stop", &label])
             .stderr(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .status();
@@ -293,8 +316,9 @@ WantedBy=default.target
         if paths::is_isolated() {
             return unit_path().exists() && paths::install_bin().exists();
         }
+        let label = super::label();
         Command::new("systemctl")
-            .args(["--user", "is-enabled", LABEL])
+            .args(["--user", "is-enabled", &label])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
